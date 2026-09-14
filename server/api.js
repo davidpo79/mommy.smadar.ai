@@ -48,9 +48,10 @@ const CHECKLIST_ORDER = `
 `;
 
 const SHIFT_SELECT = `
-  SELECT s.*, c.name AS caregiver_name
+  SELECT s.*, c.name AS caregiver_name, pb.name AS proposed_by_name
     FROM shifts s
     LEFT JOIN caregivers c ON c.id = s.caregiver_id
+    LEFT JOIN caregivers pb ON pb.id = s.proposed_by
 `;
 
 async function loadState(week, { isManager }) {
@@ -324,7 +325,7 @@ api.post('/shifts', requireRead, throttlePublicWrites, async (req, res, next) =>
   }
 });
 
-api.patch('/shifts/:id', requireManager, async (req, res, next) => {
+api.patch('/shifts/:id', requireRead, throttlePublicWrites, async (req, res, next) => {
   try {
     const id = asUuid(req.params.id);
     const expectedVersion = asVersion(req.body?.version);
@@ -337,6 +338,26 @@ api.patch('/shifts/:id', requireManager, async (req, res, next) => {
       return res
         .status(409)
         .json({ error: 'stale_version', current: serializeShift(row) });
+    }
+
+    // Nobody has committed to a pending request yet, so its owner can still
+    // edit it outright. An approved shift is a different matter: changing it
+    // goes through /proposal so the manager decides.
+    if (!req.session.isManager) {
+      if (row.confirmed) throw new HttpError(401, 'manager_required');
+      const claimed = asUuid(req.body?.as, { nullable: true });
+      if (!claimed || claimed !== row.caregiver_id) {
+        throw new HttpError(401, 'not_your_request');
+      }
+      // She may move the hours and change the note, nothing else.
+      req.body = {
+        ...req.body,
+        caregiverId: row.caregiver_id,
+        week: undefined,
+        day: req.body?.day,
+        msg: undefined,
+        confirmed: false,
+      };
     }
 
     const input = readShiftBody(req.body, row);
@@ -360,7 +381,9 @@ api.patch('/shifts/:id', requireManager, async (req, res, next) => {
       ]
     );
     const updated = await query(`${SHIFT_SELECT} WHERE s.id = $1`, [id]);
-    console.log(`[mutation] shift updated id=${id}`);
+    console.log(
+      `[mutation] shift ${req.session.isManager ? 'updated' : 'request edited'} id=${id}`
+    );
     res.json(serializeShift(updated.rows[0]));
   } catch (err) {
     next(err);
@@ -394,6 +417,119 @@ api.delete('/shifts/:id', requireRead, async (req, res, next) => {
       `[mutation] shift ${req.session.isManager ? 'deleted' : 'request withdrawn'} id=${id}`
     );
     res.json({ deleted: id });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Proposed changes to an approved shift
+//
+// The live shift is left exactly as approved; the proposal rides alongside it
+// until the manager accepts or rejects. That way the board never quietly shows
+// hours nobody agreed to.
+// ---------------------------------------------------------------------------
+async function loadShift(id) {
+  const { rows } = await query(`${SHIFT_SELECT} WHERE s.id = $1`, [id]);
+  if (!rows.length) throw new HttpError(404, 'shift_not_found');
+  return rows[0];
+}
+
+api.post('/shifts/:id/proposal', requireRead, throttlePublicWrites, async (req, res, next) => {
+  try {
+    const id = asUuid(req.params.id);
+    const shift = await loadShift(id);
+
+    if (!req.session.isManager) {
+      const claimed = asUuid(req.body?.as, { nullable: true });
+      if (!claimed || claimed !== shift.caregiver_id) {
+        throw new HttpError(401, 'not_your_shift');
+      }
+    }
+    // An unapproved shift needs no ceremony - its owner edits it directly.
+    if (!shift.confirmed) throw bad('edit_directly');
+
+    const kind = req.body?.kind;
+    if (kind !== 'change' && kind !== 'cancel') throw bad('invalid_proposal_kind');
+
+    const start = kind === 'change' ? asMinute(req.body?.start, 'start') : null;
+    const end = kind === 'change' ? asMinute(req.body?.end, 'end') : null;
+    const note =
+      req.body?.note === undefined || req.body?.note === null
+        ? null
+        : asText(req.body.note);
+
+    const proposedBy = req.session.isManager
+      ? asUuid(req.body?.as, { nullable: true })
+      : asUuid(req.body.as);
+
+    await query(
+      `UPDATE shifts
+          SET proposal_kind = $2, proposed_start_minute = $3, proposed_end_minute = $4,
+              proposed_note = $5, proposed_by = $6, proposed_at = now()
+        WHERE id = $1`,
+      [id, kind, start, end, note, proposedBy]
+    );
+    console.log(`[mutation] ${kind} proposed for shift id=${id}`);
+    res.status(201).json(serializeShift(await loadShift(id)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+const CLEAR_PROPOSAL = `
+  proposal_kind = NULL, proposed_start_minute = NULL, proposed_end_minute = NULL,
+  proposed_note = NULL, proposed_by = NULL, proposed_at = NULL
+`;
+
+/** The manager rejects a proposal; the caregiver withdraws her own. */
+api.delete('/shifts/:id/proposal', requireRead, async (req, res, next) => {
+  try {
+    const id = asUuid(req.params.id);
+    const shift = await loadShift(id);
+    if (!shift.proposal_kind) throw new HttpError(404, 'no_proposal');
+
+    if (!req.session.isManager) {
+      const claimed = asUuid(req.query.as, { nullable: true });
+      if (!claimed || claimed !== shift.proposed_by) {
+        throw new HttpError(401, 'not_your_proposal');
+      }
+    }
+
+    await query(`UPDATE shifts SET ${CLEAR_PROPOSAL} WHERE id = $1`, [id]);
+    console.log(
+      `[mutation] proposal ${req.session.isManager ? 'rejected' : 'withdrawn'} shift=${id}`
+    );
+    res.json(serializeShift(await loadShift(id)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** Manager accepts: a change is applied to the shift, a cancellation removes it. */
+api.post('/shifts/:id/proposal/accept', requireManager, async (req, res, next) => {
+  try {
+    const id = asUuid(req.params.id);
+    const shift = await loadShift(id);
+    if (!shift.proposal_kind) throw new HttpError(404, 'no_proposal');
+
+    if (shift.proposal_kind === 'cancel') {
+      await query('DELETE FROM shifts WHERE id = $1', [id]);
+      console.log(`[mutation] cancellation accepted, shift deleted id=${id}`);
+      return res.json({ accepted: 'cancel', deleted: id });
+    }
+
+    await query(
+      `UPDATE shifts
+          SET start_minute = $2,
+              end_minute = $3,
+              note = COALESCE($4, note),
+              ${CLEAR_PROPOSAL}
+        WHERE id = $1`,
+      [id, shift.proposed_start_minute, shift.proposed_end_minute, shift.proposed_note]
+    );
+    console.log(`[mutation] change accepted for shift id=${id}`);
+    res.json({ accepted: 'change', shift: serializeShift(await loadShift(id)) });
   } catch (err) {
     next(err);
   }

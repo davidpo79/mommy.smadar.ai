@@ -152,6 +152,12 @@ A check constraint keeps `done_at`/`done_by` empty on an open item, so a
 reopened task can never show a stale signature. Removing a caregiver nulls the
 reference rather than deleting their tasks.
 
+Proposed changes live on the `shifts` row itself (`proposal_kind`,
+`proposed_start_minute`, `proposed_end_minute`, `proposed_note`, `proposed_by`,
+`proposed_at`) rather than in a separate table: a shift has at most one open
+proposal, and keeping it on the row means the board reads the approved shift and
+its pending proposal in the same query.
+
 **`sync_revision`** — a single row holding a monotonic counter. Statement-level
 triggers on `caregivers` and `shifts` bump it and `pg_notify` the new value.
 
@@ -183,7 +189,10 @@ All routes are under `/api/mommy`. Mutations require a manager session.
 | `PATCH` | `/caregivers/:id` | manager | rename / change role / rate / active |
 | `DELETE` | `/caregivers/:id` | manager | deactivate or delete |
 | `POST` | `/shifts` | **read** (forced pending) | create a shift, or request one |
-| `PATCH` | `/shifts/:id` | manager | edit a shift |
+| `PATCH` | `/shifts/:id` | manager (own pending: read) | edit a shift, or amend a request |
+| `POST` | `/shifts/:id/proposal` | **read** | propose a change to an approved shift |
+| `DELETE` | `/shifts/:id/proposal` | manager rejects, owner withdraws | drop a proposal |
+| `POST` | `/shifts/:id/proposal/accept` | manager | apply the proposal |
 | `DELETE` | `/shifts/:id` | manager (own pending: read) | delete a shift, or withdraw a request |
 | `POST` | `/weeks/:week/copy-previous` | manager | replace a week with a copy of the one before |
 | `GET` | `/checklist` | read | the shared checklist |
@@ -227,7 +236,32 @@ session without the manager cookie it:
 - and refuses `PATCH` outright, so hours, notes and approval on an existing
   shift stay the manager's.
 
-Withdrawing works the same way: `DELETE /shifts/:id` accepts an `as` parameter
+**Changing a shift.** A caregiver's own request is still hers to edit outright
+while it is pending — `PATCH` accepts an `as` parameter and allows only her
+hours, day and note, forcing `confirmed` to false and leaving the manager's
+message alone. Once the shift is approved, the schedule is something people
+rely on, so changing it goes through a proposal instead:
+
+- `POST /shifts/:id/proposal` parks a proposal on the row — either new hours
+  (`kind: "change"`) or "I cannot make it" (`kind: "cancel"`), with an optional
+  note. **The live shift is not touched**, so nobody turns up at the wrong time
+  while the proposal waits, and the approval is not thrown away.
+- The manager applies it with `POST /shifts/:id/proposal/accept` — a change
+  writes the new hours and note onto the shift, a cancellation deletes it — or
+  rejects it with `DELETE /shifts/:id/proposal`, which leaves the shift exactly
+  as it was. The caregiver who raised it can withdraw it the same way with
+  `as`.
+- A proposal on a pending shift is refused with `edit_directly`: there is
+  nothing to negotiate about a request nobody has approved.
+
+Check constraints keep a proposal well-formed — a cancellation carries no
+replacement hours, a change must state them — so a half-written proposal cannot
+reach the table.
+
+On the board, a shift carrying a proposal is drawn with a dashed border, and the
+manager's pending counter includes proposals as well as unapproved shifts.
+
+Withdrawing a request works the same way: `DELETE /shifts/:id` accepts an `as` parameter
 naming the caregiver withdrawing, and a non-manager may only remove a shift that
 is still unconfirmed **and** attributed to that caregiver, so a mistaken tap
 cannot cancel somebody else's slot. Once a shift is approved it is the

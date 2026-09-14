@@ -49,6 +49,12 @@ function formatStamp(iso, timeZone) {
   }
 }
 
+function proposalSummary(proposal) {
+  return proposal.kind === 'cancel'
+    ? 'ביטול המשמרת'
+    : `שעות חדשות: ${hhmm(proposal.start)}–${hhmm(proposal.end)}`;
+}
+
 function dayLabel(isoDate) {
   if (!isoDate) return '';
   const [, month, day] = isoDate.split('-');
@@ -235,7 +241,7 @@ function WeekGrid({ days, canAdd, toneFor, hourPx, compact, today, trackRef, onA
                       'flex-direction:column',
                       'gap:1px',
                       `background:${shift.confirmed ? tone.bg : `repeating-linear-gradient(135deg,${tone.bg} 0 7px, #fdfcfa 7px 14px)`}`,
-                      `border:1px solid ${tone.border}`,
+                      `border:1px ${shift.proposal ? 'dashed' : 'solid'} ${tone.border}`,
                       'color:#26221e',
                       'font-family:Assistant, sans-serif',
                     ].join(';')
@@ -478,6 +484,7 @@ export default function App() {
   );
   const [draft, setDraft] = useState(null);
   const [draftError, setDraftError] = useState('');
+  const [proposalDraft, setProposalDraft] = useState(null);
   const [newName, setNewName] = useState('');
   const [newPaid, setNewPaid] = useState(true);
   const [shared, setShared] = useState(false);
@@ -597,7 +604,7 @@ export default function App() {
   // Caregivers may put themselves down for a slot; the request needs somebody
   // to attribute it to, so an empty roster leaves the board read-only.
   const canAdd = manager || caregivers.length > 0;
-  const pendingCount = shifts.filter((shift) => !shift.confirmed).length;
+  const pendingCount = shifts.filter((shift) => !shift.confirmed || shift.proposal).length;
   const dates = data?.dates ?? [];
 
   const toneById = useMemo(() => {
@@ -853,6 +860,7 @@ export default function App() {
   const closeEditor = () => {
     setDraft(null);
     setDraftError('');
+    setProposalDraft(null);
     window.setTimeout(() => load(weekRef.current).catch(() => {}), 0);
   };
 
@@ -883,7 +891,13 @@ export default function App() {
     setBusy(true);
     try {
       if (draft.isNew) await api.createShift(payload);
-      else await api.updateShift(draft.id, { ...payload, version: draft.version });
+      else {
+        await api.updateShift(draft.id, {
+          ...payload,
+          version: draft.version,
+          ...(manager ? {} : { as: effectiveMeId }),
+        });
+      }
       setDraft(null);
       setDraftError('');
       await load(weekRef.current);
@@ -911,6 +925,60 @@ export default function App() {
     setBusy(true);
     try {
       await api.deleteShift(draft.id, manager ? undefined : effectiveMeId);
+      setDraft(null);
+      setDraftError('');
+      await load(weekRef.current);
+    } catch (err) {
+      reportError(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submitProposal = async () => {
+    if (!draft || !proposalDraft) return;
+    setBusy(true);
+    try {
+      await api.proposeShiftChange(draft.id, {
+        as: effectiveMeId,
+        kind: proposalDraft.kind,
+        ...(proposalDraft.kind === 'change'
+          ? { start: proposalDraft.start, end: proposalDraft.end }
+          : {}),
+        note: proposalDraft.note || null,
+      });
+      setProposalDraft(null);
+      setDraft(null);
+      setDraftError('');
+      showToast('ההצעה נשלחה ליפעת.');
+      await load(weekRef.current);
+    } catch (err) {
+      reportError(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const dropProposal = async () => {
+    if (!draft) return;
+    setBusy(true);
+    try {
+      await api.dropProposal(draft.id, manager ? undefined : effectiveMeId);
+      setDraft(null);
+      setDraftError('');
+      await load(weekRef.current);
+    } catch (err) {
+      reportError(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const acceptProposal = async () => {
+    if (!draft) return;
+    setBusy(true);
+    try {
+      await api.acceptProposal(draft.id);
       setDraft(null);
       setDraftError('');
       await load(weekRef.current);
@@ -1045,6 +1113,16 @@ export default function App() {
   const dur = draftView.end > draftView.start
     ? draftView.end - draftView.start
     : draftView.end + 1440 - draftView.start;
+  // Her own request, not yet approved: still hers to edit outright.
+  const ownPendingShift =
+    !manager &&
+    draft &&
+    !draft.isNew &&
+    !draft.confirmed &&
+    draft.caregiverId &&
+    draft.caregiverId === effectiveMeId;
+  const ownApprovedShift =
+    !manager && draft && !draft.isNew && draft.confirmed && draft.caregiverId === effectiveMeId;
   const draftPersonName =
     caregivers.find((p) => p.id === draftView.caregiverId)?.name || '';
 
@@ -1380,7 +1458,9 @@ export default function App() {
                   ? `${draft.isNew ? 'שיבוץ חדש · יום ' : 'עריכת שיבוץ · יום '}${DAYS[draftView.day]}`
                   : draft.isNew
                     ? `בקשת משמרת · יום ${DAYS[draftView.day]}`
-                    : `יום ${DAYS[draftView.day]}`}
+                    : ownPendingShift
+                      ? `עריכת הבקשה · יום ${DAYS[draftView.day]}`
+                      : `יום ${DAYS[draftView.day]}`}
               </div>
               <button
                 onClick={closeEditor}
@@ -1399,6 +1479,46 @@ export default function App() {
 
             {manager ? (
               <div style={css('display:flex;flex-direction:column;gap:15px;')}>
+                {/* A caregiver has asked for something. The shift below is still
+                    what was approved; accepting applies the change. */}
+                {draftView.proposal ? (
+                  <div
+                    data-manager-proposal=""
+                    style={css('background:#fdf6ec;border:1px solid #e7d9c4;border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:8px;')}
+                  >
+                    <span style={css("font-family:'Heebo', sans-serif;font-size:14px;font-weight:700;color:#7a5a3a;")}>
+                      {`${draftView.proposal.byName || 'מלווה'} ביקשה שינוי`}
+                    </span>
+                    <span style={css('font-size:15px;color:#26221e;font-variant-numeric:tabular-nums;')}>
+                      {proposalSummary(draftView.proposal)}
+                    </span>
+                    <span style={css('font-size:14px;color:#5f574c;line-height:1.5;')}>
+                      {`במקום ${hhmm(draftView.start)}–${hhmm(draftView.end)}`}
+                    </span>
+                    {draftView.proposal.note ? (
+                      <span style={css('font-size:14px;color:#5f574c;line-height:1.5;')}>
+                        {`״${draftView.proposal.note}״`}
+                      </span>
+                    ) : null}
+                    <div style={css('display:flex;gap:8px;flex-wrap:wrap;')}>
+                      <button
+                        onClick={acceptProposal}
+                        disabled={busy}
+                        style={css('border:none;background:#26221e;color:#f6f3ee;padding:8px 16px;border-radius:999px;font-size:14px;cursor:pointer;')}
+                      >
+                        {draftView.proposal.kind === 'cancel' ? 'אישור הביטול' : 'אישור השינוי'}
+                      </button>
+                      <button
+                        onClick={dropProposal}
+                        disabled={busy}
+                        style={css('border:1px solid #d4ccc0;background:#fdfcfa;color:#45403a;padding:8px 14px;border-radius:999px;font-size:14px;cursor:pointer;')}
+                      >
+                        דחיית ההצעה
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+
                 <div style={css('display:flex;flex-direction:column;gap:7px;')}>
                   <div style={css('font-size:13px;color:#8a8073;')}>מי מלווה</div>
                   {caregivers.length === 0 ? (
@@ -1534,7 +1654,7 @@ export default function App() {
                   </button>
                 </div>
               </div>
-            ) : draft.isNew ? (
+            ) : draft.isNew || ownPendingShift ? (
               /* A caregiver putting herself down for a slot. Everything here
                  becomes a request: the server forces it unconfirmed, and it
                  stays striped on the board until יפעת approves it. */
@@ -1623,15 +1743,27 @@ export default function App() {
 
                 <div style={css('font-size:13px;color:#6f6659;line-height:1.5;background:#f5f2ec;border:1px solid #e4ddd3;border-radius:12px;padding:11px 12px;')}>
                   הבקשה תופיע בלוח בפסים אלכסוניים — ממתינה לאישור — עד שיפעת תאשר אותה.
+                  כל עוד היא לא אושרה אפשר לשנות אותה כאן.
                 </div>
 
-                <div style={css('display:flex;gap:8px;justify-content:flex-end;border-top:1px solid #eae4db;padding-top:14px;')}>
+                <div style={css('display:flex;gap:8px;justify-content:space-between;flex-wrap:wrap;border-top:1px solid #eae4db;padding-top:14px;')}>
+                  {ownPendingShift ? (
+                    <button
+                      onClick={deleteShift}
+                      disabled={busy}
+                      style={css('border:1px solid #e7d3cc;background:#fdf7f5;color:#8a4a37;padding:9px 14px;border-radius:999px;font-size:14px;cursor:pointer;')}
+                    >
+                      ביטול הבקשה
+                    </button>
+                  ) : (
+                    <span />
+                  )}
                   <button
                     onClick={saveShift}
                     disabled={busy}
                     style={css('border:none;background:#26221e;color:#f6f3ee;padding:9px 20px;border-radius:999px;font-size:14px;cursor:pointer;')}
                   >
-                    שליחת בקשה
+                    {ownPendingShift ? 'שמירת השינוי' : 'שליחת בקשה'}
                   </button>
                 </div>
               </div>
@@ -1660,25 +1792,145 @@ export default function App() {
                     {draftView.msg || 'אין הודעה חדשה.'}
                   </span>
                 </div>
-                <div style={css('display:flex;gap:8px;justify-content:space-between;align-items:center;flex-wrap:wrap;')}>
-                  {!draftView.confirmed && draftView.caregiverId && draftView.caregiverId === effectiveMeId ? (
-                    <button
-                      onClick={deleteShift}
-                      disabled={busy}
-                      style={css('border:1px solid #e7d3cc;background:#fdf7f5;color:#8a4a37;padding:9px 14px;border-radius:999px;font-size:14px;cursor:pointer;')}
-                    >
-                      ביטול הבקשה
-                    </button>
-                  ) : (
-                    <span />
-                  )}
-                  <button
-                    onClick={closeEditor}
-                    style={css('border:none;background:#26221e;color:#f6f3ee;padding:9px 20px;border-radius:999px;font-size:14px;cursor:pointer;')}
+                {draftView.proposal ? (
+                  <div style={css('background:#fdf6ec;border:1px solid #e7d9c4;border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:4px;')}>
+                    <span style={css("font-family:'Heebo', sans-serif;font-size:13px;color:#7a5a3a;")}>
+                      הצעה ממתינה לאישור של יפעת
+                    </span>
+                    <span style={css('font-size:15px;color:#26221e;font-variant-numeric:tabular-nums;')}>
+                      {proposalSummary(draftView.proposal)}
+                    </span>
+                    {draftView.proposal.note ? (
+                      <span style={css('font-size:14px;color:#5f574c;line-height:1.5;')}>
+                        {draftView.proposal.note}
+                      </span>
+                    ) : null}
+                    <span style={css('font-size:12px;color:#a1978a;')}>
+                      {`${draftView.proposal.byName || 'מלווה'}${
+                        draftView.proposal.at ? ` · ${formatStamp(draftView.proposal.at, data?.timezone)}` : ''
+                      }`}
+                    </span>
+                  </div>
+                ) : null}
+
+                {proposalDraft ? (
+                  <div
+                    data-proposal-form=""
+                    style={css('display:flex;flex-direction:column;gap:12px;border-top:1px solid #eae4db;padding-top:14px;')}
                   >
-                    סגירה
-                  </button>
-                </div>
+                    <div style={css("font-family:'Heebo', sans-serif;font-size:15px;font-weight:700;")}>
+                      {proposalDraft.kind === 'cancel' ? 'לא אוכל להגיע' : 'הצעת שינוי בשעות'}
+                    </div>
+
+                    {proposalDraft.kind === 'change' ? (
+                      <div style={css('display:flex;gap:10px;flex-wrap:wrap;')}>
+                        <label style={css('display:flex;flex-direction:column;gap:6px;flex:1;min-width:110px;')}>
+                          <span style={css('font-size:13px;color:#8a8073;')}>משעה</span>
+                          <select
+                            value={String(proposalDraft.start)}
+                            onChange={(e) =>
+                              setProposalDraft((cur) => ({ ...cur, start: Number(e.target.value) }))
+                            }
+                            style={css('width:100%;min-width:0;border:1px solid #d4ccc0;background:#fff;border-radius:10px;padding:9px 10px;font-size:15px;color:#26221e;font-variant-numeric:tabular-nums;')}
+                          >
+                            {TIME_OPTIONS.map((t) => (
+                              <option key={t.value} value={String(t.value)}>{t.label}</option>
+                            ))}
+                          </select>
+                        </label>
+                        <label style={css('display:flex;flex-direction:column;gap:6px;flex:1;min-width:110px;')}>
+                          <span style={css('font-size:13px;color:#8a8073;')}>עד שעה</span>
+                          <select
+                            value={String(proposalDraft.end)}
+                            onChange={(e) =>
+                              setProposalDraft((cur) => ({ ...cur, end: Number(e.target.value) }))
+                            }
+                            style={css('width:100%;min-width:0;border:1px solid #d4ccc0;background:#fff;border-radius:10px;padding:9px 10px;font-size:15px;color:#26221e;font-variant-numeric:tabular-nums;')}
+                          >
+                            {TIME_OPTIONS.map((t) => (
+                              <option key={t.value} value={String(t.value)}>{t.label}</option>
+                            ))}
+                          </select>
+                        </label>
+                      </div>
+                    ) : null}
+
+                    <label style={css('display:flex;flex-direction:column;gap:6px;')}>
+                      <span style={css('font-size:13px;color:#8a8073;')}>
+                        {proposalDraft.kind === 'cancel' ? 'מה קרה (לא חובה)' : 'הערה ליפעת (לא חובה)'}
+                      </span>
+                      <input
+                        value={proposalDraft.note}
+                        onChange={(e) => setProposalDraft((cur) => ({ ...cur, note: e.target.value }))}
+                        placeholder={proposalDraft.kind === 'cancel' ? 'לא אוכל להגיע כי…' : 'אאחר בשעה'}
+                        style={css('width:100%;min-width:0;border:1px solid #d4ccc0;background:#fff;border-radius:10px;padding:9px 11px;font-size:15px;color:#26221e;')}
+                      />
+                    </label>
+
+                    <div style={css('font-size:13px;color:#6f6659;line-height:1.5;')}>
+                      המשמרת נשארת כפי שאושרה עד שיפעת תאשר את ההצעה.
+                    </div>
+
+                    <div style={css('display:flex;gap:8px;justify-content:space-between;flex-wrap:wrap;')}>
+                      <button
+                        onClick={() => setProposalDraft(null)}
+                        style={css('border:1px solid #d4ccc0;background:#fdfcfa;color:#45403a;padding:9px 14px;border-radius:999px;font-size:14px;cursor:pointer;')}
+                      >
+                        ביטול
+                      </button>
+                      <button
+                        onClick={submitProposal}
+                        disabled={busy}
+                        style={css('border:none;background:#26221e;color:#f6f3ee;padding:9px 20px;border-radius:999px;font-size:14px;cursor:pointer;')}
+                      >
+                        שליחת ההצעה
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={css('display:flex;gap:8px;justify-content:space-between;align-items:center;flex-wrap:wrap;border-top:1px solid #eae4db;padding-top:14px;')}>
+                    <div style={css('display:flex;gap:8px;flex-wrap:wrap;')}>
+                      {ownApprovedShift && !draftView.proposal ? (
+                        <>
+                          <button
+                            onClick={() =>
+                              setProposalDraft({
+                                kind: 'change',
+                                start: draftView.start,
+                                end: draftView.end,
+                                note: '',
+                              })
+                            }
+                            style={css('border:1px solid #d4ccc0;background:#fdfcfa;color:#45403a;padding:9px 14px;border-radius:999px;font-size:14px;cursor:pointer;')}
+                          >
+                            הצעת שינוי
+                          </button>
+                          <button
+                            onClick={() => setProposalDraft({ kind: 'cancel', note: '' })}
+                            style={css('border:1px solid #e7d3cc;background:#fdf7f5;color:#8a4a37;padding:9px 14px;border-radius:999px;font-size:14px;cursor:pointer;')}
+                          >
+                            לא אוכל להגיע
+                          </button>
+                        </>
+                      ) : null}
+                      {draftView.proposal && draftView.proposal.byId === effectiveMeId ? (
+                        <button
+                          onClick={dropProposal}
+                          disabled={busy}
+                          style={css('border:1px solid #d4ccc0;background:#fdfcfa;color:#45403a;padding:9px 14px;border-radius:999px;font-size:14px;cursor:pointer;')}
+                        >
+                          ביטול ההצעה
+                        </button>
+                      ) : null}
+                    </div>
+                    <button
+                      onClick={closeEditor}
+                      style={css('border:none;background:#26221e;color:#f6f3ee;padding:9px 20px;border-radius:999px;font-size:14px;cursor:pointer;')}
+                    >
+                      סגירה
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>

@@ -47,6 +47,12 @@ export const api = {
 
   createShift: (payload) => request('POST', '/shifts', payload),
   updateShift: (id, payload) => request('PATCH', `/shifts/${id}`, payload),
+  proposeShiftChange: (id, payload) => request('POST', `/shifts/${id}/proposal`, payload),
+  acceptProposal: (id) => request('POST', `/shifts/${id}/proposal/accept`),
+  // A manager rejects; a caregiver withdraws her own, naming herself in `as`.
+  dropProposal: (id, as) =>
+    request('DELETE', `/shifts/${id}/proposal${as ? `?as=${encodeURIComponent(as)}` : ''}`),
+
   // `as` names the caregiver withdrawing a pending request; managers omit it.
   deleteShift: (id, as) =>
     request('DELETE', `/shifts/${id}${as ? `?as=${encodeURIComponent(as)}` : ''}`),

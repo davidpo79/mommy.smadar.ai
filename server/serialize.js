@@ -26,6 +26,19 @@ export function serializeShift(row) {
     confirmed: row.confirmed,
     version: row.version,
     updatedAt: row.updated_at,
+    // A change the caregiver has asked for. The fields above still describe the
+    // shift as it stands, so the board keeps showing what was approved.
+    proposal: row.proposal_kind
+      ? {
+          kind: row.proposal_kind,
+          start: row.proposed_start_minute,
+          end: row.proposed_end_minute,
+          note: row.proposed_note,
+          byId: row.proposed_by,
+          byName: row.proposed_by_name || '',
+          at: row.proposed_at,
+        }
+      : null,
   };
 }
 
