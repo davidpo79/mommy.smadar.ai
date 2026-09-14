@@ -196,6 +196,12 @@ expiry. Every mutating route is behind `requireManager`, so calling the API
 directly without that cookie fails with `401` regardless of what the UI shows.
 Code entry is throttled to 10 attempts per IP per 10 minutes.
 
+Signing out is offered wherever a manager session exists — on the manager board
+and in the team view — and clears the cookie server-side before reloading onto
+the public board. The session otherwise lasts `SESSION_MAX_AGE_SECONDS`
+(30 days by default), so the code is asked for once per device rather than on
+every visit.
+
 The team view is read-only and, by default, open to anyone with the link — the
 same reach the prototype's share link had, minus the schedule in the URL. Set
 `TEAM_ACCESS_CODE` to put a shared code in front of it; the app then asks for

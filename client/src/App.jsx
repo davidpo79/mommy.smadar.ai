@@ -679,6 +679,17 @@ export default function App() {
     }
   };
 
+  const logout = async () => {
+    try {
+      await api.logout();
+    } catch {
+      // The cookie may already be gone or the network may be down; reloading
+      // still drops every bit of manager state this tab is holding.
+    }
+    // Drop ?view=team as well, so signing out lands on a clean team board.
+    window.location.replace(window.location.pathname);
+  };
+
   const toggleView = async () => {
     if (manager) {
       setPreviewTeam(true);
@@ -977,10 +988,12 @@ export default function App() {
             >
               {manager ? 'מעבר לתצוגת המלווים' : 'כניסה לתצוגת יפעת'}
             </button>
-            {!manager && data?.isManager ? (
+            {/* Offered in both views: from the manager board this used to need
+                a detour through the team view first. */}
+            {data?.isManager ? (
               <button
-                onClick={() => api.logout().then(() => window.location.reload())}
-                style={css('align-self:flex-start;border:none;background:transparent;color:#a1978a;padding:0;font-size:12.5px;cursor:pointer;')}
+                onClick={logout}
+                style={css('align-self:flex-start;border:1px solid #e4ddd3;background:transparent;color:#8a8073;padding:7px 13px;border-radius:999px;font-size:12.5px;cursor:pointer;')}
               >
                 יציאה מהחשבון
               </button>
