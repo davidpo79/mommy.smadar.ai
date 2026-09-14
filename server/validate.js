@@ -66,3 +66,11 @@ export function asVersion(value) {
   if (!Number.isInteger(num) || num < 1) throw bad('invalid_version');
   return num;
 }
+
+export function asChecklistText(value) {
+  if (typeof value !== 'string') throw bad('text_required');
+  const text = value.trim().replace(/\s+/g, ' ');
+  if (!text) throw bad('text_required');
+  if (text.length > 300) throw bad('text_too_long');
+  return text;
+}

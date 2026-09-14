@@ -6,6 +6,7 @@ import {
   clientIp,
   requireManager,
   requireRead,
+  throttlePublicWrites,
   resetThrottle,
   safeEqual,
   setManagerCookie,
@@ -14,10 +15,11 @@ import {
 } from './auth.js';
 import { syncHub } from './sync.js';
 import { addWeeks, currentDate, currentWeekStart, normalizeWeek, weekDates } from './week.js';
-import { serializeCaregiver, serializeShift } from './serialize.js';
+import { serializeCaregiver, serializeChecklistItem, serializeShift } from './serialize.js';
 import {
   HttpError,
   asBool,
+  asChecklistText,
   asDay,
   asMinute,
   asName,
@@ -30,6 +32,21 @@ import {
 
 export const api = express.Router();
 
+const CHECKLIST_SELECT = `
+  SELECT i.*,
+         c.name AS created_by_name,
+         d.name AS done_by_name
+    FROM checklist_items i
+    LEFT JOIN caregivers c ON c.id = i.created_by
+    LEFT JOIN caregivers d ON d.id = i.done_by
+`;
+
+// Open tasks first in the order they were added, then the most recently
+// completed - a handover reads top to bottom.
+const CHECKLIST_ORDER = `
+  ORDER BY i.done, i.position, i.created_at, i.done_at DESC
+`;
+
 const SHIFT_SELECT = `
   SELECT s.*, c.name AS caregiver_name
     FROM shifts s
@@ -37,7 +54,7 @@ const SHIFT_SELECT = `
 `;
 
 async function loadState(week, { isManager }) {
-  const [revision, caregivers, shifts] = await Promise.all([
+  const [revision, caregivers, shifts, checklist] = await Promise.all([
     getRevision(),
     query(
       `SELECT * FROM caregivers WHERE active ORDER BY sort_order, created_at, name`
@@ -45,6 +62,7 @@ async function loadState(week, { isManager }) {
     query(`${SHIFT_SELECT} WHERE s.week_start = $1 ORDER BY s.day_of_week, s.start_minute`, [
       week,
     ]),
+    query(`${CHECKLIST_SELECT} ${CHECKLIST_ORDER}`),
   ]);
 
   const current = currentWeekStart();
@@ -67,6 +85,7 @@ async function loadState(week, { isManager }) {
     dates: weekDates(week),
     caregivers: caregivers.rows.map((row) => serializeCaregiver(row, { isManager })),
     shifts: shifts.rows.map(serializeShift),
+    checklist: checklist.rows.map(serializeChecklistItem),
   };
 }
 
@@ -374,6 +393,118 @@ api.post('/weeks/:week/copy-previous', requireManager, async (req, res, next) =>
     console.log(`[mutation] copied ${copied} shift(s) ${source} -> ${week}`);
     const state = await loadState(week, { isManager: true });
     res.json({ copied, source, ...state });
+  } catch (err) {
+    next(err);
+  }
+});
+
+
+// ---------------------------------------------------------------------------
+// Shared checklist
+//
+// Adding a task and ticking one off are open to anyone who can read the board,
+// so a caregiver on shift does not need the manager code to hand work over.
+// Editing the wording and removing items stay manager-only: additive changes
+// from an anonymous writer are recoverable, destructive ones are not.
+// ---------------------------------------------------------------------------
+const MAX_CHECKLIST_ITEMS = 300;
+
+async function loadChecklistItem(id) {
+  const { rows } = await query(`${CHECKLIST_SELECT} WHERE i.id = $1`, [id]);
+  if (!rows.length) throw new HttpError(404, 'item_not_found');
+  return rows[0];
+}
+
+api.get('/checklist', requireRead, async (_req, res, next) => {
+  try {
+    const { rows } = await query(`${CHECKLIST_SELECT} ${CHECKLIST_ORDER}`);
+    res.json({ checklist: rows.map(serializeChecklistItem) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+api.post('/checklist', requireRead, throttlePublicWrites, async (req, res, next) => {
+  try {
+    const text = asChecklistText(req.body?.text);
+    const caregiverId = asUuid(req.body?.caregiverId, { nullable: true });
+    await assertCaregiverExists(caregiverId);
+
+    const { rows: counted } = await query('SELECT COUNT(*)::int AS n FROM checklist_items');
+    if (counted[0].n >= MAX_CHECKLIST_ITEMS) {
+      throw new HttpError(409, 'checklist_full');
+    }
+
+    const { rows } = await query(
+      `INSERT INTO checklist_items (body, created_by, position)
+       VALUES ($1, $2, COALESCE((SELECT MAX(position) + 1 FROM checklist_items), 0))
+       RETURNING id`,
+      [text, caregiverId]
+    );
+    console.log(`[mutation] checklist item created id=${rows[0].id}`);
+    res.status(201).json(serializeChecklistItem(await loadChecklistItem(rows[0].id)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+api.patch('/checklist/:id', requireRead, throttlePublicWrites, async (req, res, next) => {
+  try {
+    const id = asUuid(req.params.id);
+    const expectedVersion = asVersion(req.body?.version);
+    const row = await loadChecklistItem(id);
+
+    if (expectedVersion !== null && expectedVersion !== row.version) {
+      return res
+        .status(409)
+        .json({ error: 'stale_version', current: serializeChecklistItem(row) });
+    }
+
+    // Rewording an existing task is a manager action; ticking it is not.
+    if (req.body?.text !== undefined && !req.session.isManager) {
+      throw new HttpError(401, 'manager_required');
+    }
+
+    const text = req.body?.text === undefined ? row.body : asChecklistText(req.body.text);
+    const done = asBool(req.body?.done, row.done);
+    const caregiverId = asUuid(req.body?.caregiverId, { nullable: true });
+    if (caregiverId) await assertCaregiverExists(caregiverId);
+
+    // Who ticked it and when are recorded on the transition, and cleared when
+    // an item is reopened so the card never shows a stale signature.
+    const doneBy = done ? (row.done ? row.done_by : caregiverId) : null;
+    const doneAt = done ? (row.done ? row.done_at : new Date()) : null;
+
+    await query(
+      `UPDATE checklist_items
+          SET body = $2, done = $3, done_by = $4, done_at = $5
+        WHERE id = $1`,
+      [id, text, done, doneBy, doneAt]
+    );
+    console.log(`[mutation] checklist item ${done ? 'checked' : 'unchecked'} id=${id}`);
+    res.json(serializeChecklistItem(await loadChecklistItem(id)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+api.delete('/checklist/:id', requireManager, async (req, res, next) => {
+  try {
+    const id = asUuid(req.params.id);
+    const { rowCount } = await query('DELETE FROM checklist_items WHERE id = $1', [id]);
+    if (!rowCount) throw new HttpError(404, 'item_not_found');
+    console.log(`[mutation] checklist item deleted id=${id}`);
+    res.json({ deleted: id });
+  } catch (err) {
+    next(err);
+  }
+});
+
+api.post('/checklist/clear-done', requireManager, async (_req, res, next) => {
+  try {
+    const { rowCount } = await query('DELETE FROM checklist_items WHERE done');
+    console.log(`[mutation] cleared ${rowCount} completed checklist item(s)`);
+    res.json({ cleared: rowCount });
   } catch (err) {
     next(err);
   }

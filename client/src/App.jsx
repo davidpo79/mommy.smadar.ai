@@ -8,6 +8,9 @@ const DAYS = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 
 const HOUR_PX = 34;
 const ACCENT = 'oklch(0.52 0.08 232)';
 const WEEK_MINUTES = 7 * 24 * 60;
+// Which caregiver is using this device. A per-viewer convenience, never a
+// source of truth - the schedule and the checklist live in PostgreSQL.
+const ME_KEY = 'mommy:me';
 
 function hhmm(min) {
   const m = ((min % 1440) + 1440) % 1440;
@@ -20,6 +23,20 @@ function shiftLen(s) {
 
 function hoursLabel(min) {
   return `${(Math.round((min / 60) * 10) / 10).toString().replace('.0', '')} ש׳`;
+}
+
+function formatStamp(iso, timeZone) {
+  try {
+    return new Intl.DateTimeFormat('he-IL', {
+      timeZone,
+      day: 'numeric',
+      month: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(new Date(iso));
+  } catch {
+    return '';
+  }
 }
 
 function dayLabel(isoDate) {
@@ -268,6 +285,167 @@ function WeekGrid({ days, manager, toneFor, hourPx, compact, today, trackRef, on
 }
 
 
+/**
+ * Shared checklist.
+ *
+ * Anyone looking at the board can add a task or tick one off - a caregiver
+ * mid-shift should not need the manager code to hand work over. Who ticked
+ * something is recorded when they have said who they are; the choice is kept
+ * per device in localStorage, which is a viewer preference rather than shared
+ * state, so it never becomes a second source of truth.
+ */
+function ChecklistCard({
+  items,
+  caregivers,
+  manager,
+  meId,
+  onChooseMe,
+  onAdd,
+  onToggle,
+  onDelete,
+  onClearDone,
+  busy,
+  isNarrow,
+  timezone,
+}) {
+  const [text, setText] = useState('');
+  const open = items.filter((item) => !item.done);
+  const done = items.filter((item) => item.done);
+
+  const submit = (event) => {
+    event.preventDefault();
+    const value = text.trim();
+    if (!value) return;
+    onAdd(value);
+    setText('');
+  };
+
+  return (
+    <div
+      data-checklist=""
+      style={css(
+        `flex:1;min-width:${isNarrow ? '0' : '300px'};background:#fdfcfa;border:1px solid #e4ddd3;` +
+          `border-radius:14px;padding:16px ${isNarrow ? '14px' : '18px'};display:flex;flex-direction:column;gap:12px;`
+      )}
+    >
+      <div style={css('display:flex;justify-content:space-between;align-items:baseline;gap:10px;')}>
+        <div style={css("font-family:'Heebo', sans-serif;font-size:17px;font-weight:700;")}>צ׳קליסט משותף</div>
+        <div style={css('font-size:12px;color:#8a8073;')}>
+          {open.length === 0 ? 'הכול בוצע' : `${open.length} פתוחות`}
+        </div>
+      </div>
+
+      {caregivers.length > 0 ? (
+        <label style={css('display:flex;align-items:center;gap:7px;font-size:13px;color:#8a8073;')}>
+          <span style={css('flex:none;')}>אני</span>
+          <select
+            value={meId}
+            onChange={(event) => onChooseMe(event.target.value)}
+            style={css('flex:1;min-width:0;border:1px solid #d4ccc0;background:#fff;border-radius:999px;padding:7px 11px;font-size:14px;color:#26221e;')}
+          >
+            <option value="">בלי לציין שם</option>
+            {caregivers.map((person) => (
+              <option key={person.id} value={person.id}>
+                {person.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+
+      <form onSubmit={submit} style={css('display:flex;gap:8px;align-items:center;')}>
+        <input
+          value={text}
+          onChange={(event) => setText(event.target.value)}
+          placeholder="משימה חדשה"
+          maxLength={300}
+          style={css('flex:1;min-width:0;border:1px solid #d4ccc0;background:#fdfcfa;border-radius:999px;padding:8px 13px;font-size:14px;color:#26221e;')}
+        />
+        <button
+          type="submit"
+          disabled={busy}
+          aria-label="הוספת משימה"
+          style={css('flex:none;border:none;background:#26221e;color:#f6f3ee;border-radius:999px;padding:9px 16px;font-size:14px;cursor:pointer;')}
+        >
+          הוספה
+        </button>
+      </form>
+
+      {items.length === 0 ? (
+        <div style={css('font-size:14px;color:#8a8073;line-height:1.55;padding:4px 2px;')}>
+          אין עדיין משימות. כל מלווה יכולה להוסיף כאן משימה או לסמן וי על משימה שבוצעה.
+        </div>
+      ) : null}
+
+      <div style={css('display:flex;flex-direction:column;gap:6px;')}>
+        {[...open, ...done].map((item) => (
+          <div
+            key={item.id}
+            style={css(
+              `display:flex;align-items:flex-start;gap:8px;padding:8px 10px;border-radius:10px;` +
+                `background:${item.done ? '#f2efe9' : '#f7f3ed'};`
+            )}
+          >
+            <button
+              onClick={() => onToggle(item)}
+              disabled={busy}
+              aria-label={item.done ? `ביטול סימון: ${item.text}` : `סימון כבוצע: ${item.text}`}
+              style={css(
+                `flex:none;width:22px;height:22px;border-radius:7px;cursor:pointer;font-size:13px;line-height:1;` +
+                  (item.done
+                    ? 'border:1px solid oklch(0.76 0.08 150);background:oklch(0.95 0.04 150);color:oklch(0.45 0.09 150);'
+                    : 'border:1px solid #d4ccc0;background:#fff;color:transparent;')
+              )}
+            >
+              ✓
+            </button>
+            <span style={css('flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;')}>
+              <span
+                style={css(
+                  `font-size:14.5px;line-height:1.4;overflow-wrap:anywhere;` +
+                    (item.done ? 'color:#8a8073;text-decoration:line-through;' : 'color:#26221e;')
+                )}
+              >
+                {item.text}
+              </span>
+              <span style={css('font-size:11.5px;color:#a1978a;')}>
+                {item.done
+                  ? `בוצע${item.doneByName ? ` · ${item.doneByName}` : ''}${
+                      item.doneAt ? ` · ${formatStamp(item.doneAt, timezone)}` : ''
+                    }`
+                  : item.createdByName
+                    ? `הוסיפה: ${item.createdByName}`
+                    : ''}
+              </span>
+            </span>
+            {manager ? (
+              <button
+                onClick={() => onDelete(item)}
+                disabled={busy}
+                title="מחיקה"
+                aria-label={`מחיקת המשימה: ${item.text}`}
+                style={css('flex:none;border:none;background:transparent;color:#a1978a;font-size:15px;line-height:1;padding:2px 4px;cursor:pointer;')}
+              >
+                ×
+              </button>
+            ) : null}
+          </div>
+        ))}
+      </div>
+
+      {manager && done.length > 0 ? (
+        <button
+          onClick={onClearDone}
+          disabled={busy}
+          style={css('align-self:flex-start;border:1px solid #e4ddd3;background:transparent;color:#8a8073;padding:7px 13px;border-radius:999px;font-size:12.5px;cursor:pointer;')}
+        >
+          {`ניקוי ${done.length} שבוצעו`}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 export default function App() {
   const [boot, setBoot] = useState({ status: 'loading', error: '' });
   const [data, setData] = useState(null);
@@ -285,6 +463,13 @@ export default function App() {
   const [passError, setPassError] = useState('');
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState('');
+  const [meId, setMeId] = useState(() => {
+    try {
+      return localStorage.getItem(ME_KEY) || '';
+    } catch {
+      return '';
+    }
+  });
 
   const revisionRef = useRef(0);
   const weekRef = useRef(null);
@@ -382,7 +567,10 @@ export default function App() {
   });
 
   const caregivers = data?.caregivers ?? [];
+  const checklist = data?.checklist ?? [];
   const shifts = data?.shifts ?? [];
+  // A remembered caregiver who has since left the roster is treated as unset.
+  const effectiveMeId = caregivers.some((person) => person.id === meId) ? meId : '';
   const dates = data?.dates ?? [];
 
   const toneById = useMemo(() => {
@@ -581,6 +769,41 @@ export default function App() {
     if (!manager) return;
     if (!window.confirm(`להסיר את ${person.name} מרשימת המלווים?`)) return;
     run(() => api.deleteCaregiver(person.id)).catch(() => {});
+  };
+
+  const chooseMe = (id) => {
+    setMeId(id);
+    try {
+      if (id) localStorage.setItem(ME_KEY, id);
+      else localStorage.removeItem(ME_KEY);
+    } catch {
+      // Private browsing or blocked storage: the choice just will not stick.
+    }
+  };
+
+  const addChecklistItem = (text) => {
+    run(() => api.createChecklistItem({ text, caregiverId: effectiveMeId || null })).catch(() => {});
+  };
+
+  const toggleChecklistItem = (item) => {
+    // Deliberately no version check: ticking a box is not an edit worth losing
+    // to a race, and two people ticking the same task agree anyway.
+    run(() =>
+      api.updateChecklistItem(item.id, {
+        done: !item.done,
+        caregiverId: effectiveMeId || null,
+      })
+    ).catch(() => {});
+  };
+
+  const deleteChecklistItem = (item) => {
+    if (!window.confirm(`למחוק את המשימה "${item.text}"?`)) return;
+    run(() => api.deleteChecklistItem(item.id)).catch(() => {});
+  };
+
+  const clearDoneChecklist = () => {
+    if (!window.confirm('למחוק את כל המשימות שכבר בוצעו?')) return;
+    run(() => api.clearDoneChecklist()).catch(() => {});
   };
 
   const copyPrev = () => {
@@ -888,7 +1111,12 @@ export default function App() {
           }}
         />
 
-        <section style={css('display:flex;flex-wrap:wrap;gap:18px;align-items:stretch;')}>
+        <section
+          style={css(
+            `display:flex;flex-wrap:wrap;align-items:stretch;` +
+              `flex-direction:${isNarrow ? 'column' : 'row'};gap:${isNarrow ? '12px' : '18px'};`
+          )}
+        >
           {manager ? (
             <div style={css(`flex:1;min-width:${isNarrow ? '0' : '330px'};background:#fdfcfa;border:1px solid #e4ddd3;border-radius:14px;padding:16px ${isNarrow ? '14px' : '18px'};display:flex;flex-direction:column;gap:12px;`)}>
               <div style={css('display:flex;justify-content:space-between;align-items:baseline;gap:10px;')}>
@@ -941,6 +1169,21 @@ export default function App() {
             </div>
           ) : null}
 
+          <ChecklistCard
+            items={checklist}
+            caregivers={caregivers}
+            manager={manager}
+            meId={effectiveMeId}
+            onChooseMe={chooseMe}
+            onAdd={addChecklistItem}
+            onToggle={toggleChecklistItem}
+            onDelete={deleteChecklistItem}
+            onClearDone={clearDoneChecklist}
+            busy={busy}
+            isNarrow={isNarrow}
+            timezone={data?.timezone}
+          />
+
           <div style={css(`flex:1;min-width:${isNarrow ? '0' : '300px'};display:flex;flex-direction:column;gap:12px;`)}>
             <div style={css('font-size:13px;color:#8a8073;')}>מלווים</div>
             <div style={css('display:flex;flex-wrap:wrap;gap:8px;align-items:center;')}>
@@ -983,13 +1226,18 @@ export default function App() {
                     value={newName}
                     onChange={(e) => setNewName(e.target.value)}
                     placeholder="שם מלווה"
-                    style={css('border:1px solid #d4ccc0;background:#fdfcfa;border-radius:999px;padding:8px 13px;font-size:14px;width:132px;color:#26221e;')}
+                    style={css(`border:1px solid #d4ccc0;background:#fdfcfa;border-radius:999px;padding:8px 13px;font-size:14px;${isNarrow ? 'flex:1;min-width:0;' : 'width:132px;'}color:#26221e;`)}
                   />
                   <div style={css('display:flex;gap:4px;background:#ece7df;padding:4px;border-radius:999px;')}>
                     <button type="button" onClick={() => setNewPaid(false)} style={css(roleBtn(!newPaid))}>משפחה</button>
                     <button type="button" onClick={() => setNewPaid(true)} style={css(roleBtn(newPaid))}>בתשלום</button>
                   </div>
-                  <button type="submit" disabled={busy} style={css('border:none;background:#26221e;color:#f6f3ee;border-radius:999px;padding:9px 16px;font-size:14px;cursor:pointer;')}>
+                  <button
+                    type="submit"
+                    disabled={busy}
+                    aria-label="הוספת מלווה"
+                    style={css('border:none;background:#26221e;color:#f6f3ee;border-radius:999px;padding:9px 16px;font-size:14px;cursor:pointer;')}
+                  >
                     הוספה
                   </button>
                 </form>
@@ -1079,9 +1327,10 @@ export default function App() {
           style={css(`position:fixed;inset:0;background:rgba(38, 34, 30, 0.34);display:flex;align-items:center;justify-content:center;padding:${isNarrow ? '10px' : '20px'};z-index:40;`)}
         >
           <div
+            data-editor=""
             onClick={(e) => e.stopPropagation()}
             dir="rtl"
-            style={css(`background:#fdfcfa;border-radius:18px;padding:${isNarrow ? '16px' : '22px'};width:100%;max-width:460px;max-height:${isNarrow ? '92vh' : '88vh'};overflow-y:auto;display:flex;flex-direction:column;gap:15px;box-shadow:0 24px 60px rgba(38, 34, 30, 0.26);`)}
+            style={css(`background:#fdfcfa;border-radius:18px;padding:${isNarrow ? '16px' : '22px'};width:100%;min-width:0;max-width:460px;max-height:${isNarrow ? '92vh' : '88vh'};overflow-y:auto;display:flex;flex-direction:column;gap:15px;box-shadow:0 24px 60px rgba(38, 34, 30, 0.26);`)}
           >
             <div style={css('display:flex;justify-content:space-between;align-items:flex-start;gap:12px;')}>
               <div style={css("font-family:'Heebo', sans-serif;font-size:20px;font-weight:700;")}>
@@ -1089,7 +1338,11 @@ export default function App() {
                   ? `${draft.isNew ? 'שיבוץ חדש · יום ' : 'עריכת שיבוץ · יום '}${DAYS[draftView.day]}`
                   : `יום ${DAYS[draftView.day]}`}
               </div>
-              <button onClick={closeEditor} style={css('border:none;background:#ece7df;color:#45403a;width:30px;height:30px;border-radius:999px;font-size:17px;cursor:pointer;')}>
+              <button
+                onClick={closeEditor}
+                aria-label="סגירת החלון"
+                style={css('border:none;background:#ece7df;color:#45403a;width:30px;height:30px;border-radius:999px;font-size:17px;cursor:pointer;flex:none;')}
+              >
                 ×
               </button>
             </div>
@@ -1132,6 +1385,7 @@ export default function App() {
                         <button
                           type="submit"
                           disabled={busy}
+                          aria-label="הוספת מלווה"
                           style={css('border:none;background:#26221e;color:#f6f3ee;border-radius:999px;padding:9px 16px;font-size:14px;cursor:pointer;')}
                         >
                           הוספה
@@ -1160,24 +1414,24 @@ export default function App() {
                 </div>
 
                 <div style={css('display:flex;gap:10px;flex-wrap:wrap;')}>
-                  <label style={css('display:flex;flex-direction:column;gap:6px;flex:1;min-width:120px;')}>
+                  <label style={css('display:flex;flex-direction:column;gap:6px;flex:1;min-width:110px;')}>
                     <span style={css('font-size:13px;color:#8a8073;')}>משעה</span>
                     <select
                       value={String(draftView.start)}
                       onChange={(e) => patchDraft({ start: Number(e.target.value) })}
-                      style={css('border:1px solid #d4ccc0;background:#fff;border-radius:10px;padding:9px 10px;font-size:15px;color:#26221e;font-variant-numeric:tabular-nums;')}
+                      style={css('width:100%;min-width:0;border:1px solid #d4ccc0;background:#fff;border-radius:10px;padding:9px 10px;font-size:15px;color:#26221e;font-variant-numeric:tabular-nums;')}
                     >
                       {TIME_OPTIONS.map((t) => (
                         <option key={t.value} value={String(t.value)}>{t.label}</option>
                       ))}
                     </select>
                   </label>
-                  <label style={css('display:flex;flex-direction:column;gap:6px;flex:1;min-width:120px;')}>
+                  <label style={css('display:flex;flex-direction:column;gap:6px;flex:1;min-width:110px;')}>
                     <span style={css('font-size:13px;color:#8a8073;')}>עד שעה</span>
                     <select
                       value={String(draftView.end)}
                       onChange={(e) => patchDraft({ end: Number(e.target.value) })}
-                      style={css('border:1px solid #d4ccc0;background:#fff;border-radius:10px;padding:9px 10px;font-size:15px;color:#26221e;font-variant-numeric:tabular-nums;')}
+                      style={css('width:100%;min-width:0;border:1px solid #d4ccc0;background:#fff;border-radius:10px;padding:9px 10px;font-size:15px;color:#26221e;font-variant-numeric:tabular-nums;')}
                     >
                       {TIME_OPTIONS.map((t) => (
                         <option key={t.value} value={String(t.value)}>{t.label}</option>
@@ -1195,7 +1449,7 @@ export default function App() {
                     value={draftView.note || ''}
                     onChange={(e) => patchDraft({ note: e.target.value })}
                     placeholder="תרופות ב־09:00, ביקור רופא, אוכל"
-                    style={css('border:1px solid #d4ccc0;background:#fff;border-radius:10px;padding:9px 11px;font-size:15px;color:#26221e;')}
+                    style={css('width:100%;min-width:0;border:1px solid #d4ccc0;background:#fff;border-radius:10px;padding:9px 11px;font-size:15px;color:#26221e;')}
                   />
                 </label>
 
@@ -1206,7 +1460,7 @@ export default function App() {
                     onChange={(e) => patchDraft({ msg: e.target.value })}
                     rows={3}
                     placeholder="אני בבית הערב — אם היא מתעוררת תעדכני אותי"
-                    style={css('border:1px solid #d4ccc0;background:#fff;border-radius:10px;padding:9px 11px;font-size:15px;color:#26221e;resize:vertical;line-height:1.5;')}
+                    style={css('width:100%;min-width:0;border:1px solid #d4ccc0;background:#fff;border-radius:10px;padding:9px 11px;font-size:15px;color:#26221e;resize:vertical;line-height:1.5;')}
                   />
                 </label>
 

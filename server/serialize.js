@@ -28,3 +28,20 @@ export function serializeShift(row) {
     updatedAt: row.updated_at,
   };
 }
+
+export function serializeChecklistItem(row) {
+  return {
+    id: row.id,
+    text: row.body,
+    done: row.done,
+    createdById: row.created_by,
+    createdByName: row.created_by_name || '',
+    doneById: row.done_by,
+    doneByName: row.done_by_name || '',
+    doneAt: row.done_at,
+    position: row.position,
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}

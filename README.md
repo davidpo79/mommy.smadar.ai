@@ -86,9 +86,13 @@ compact variant rather than a different structure.
 - **Each day header carries a coverage bar**, so the week's gaps read at a
   glance even when the blocks are too small to label, and today's column is
   tinted. Today comes from the server in `APP_TIMEZONE`, not the device clock.
-- Header, coverage card, hours panel and both modals tighten their spacing and
-  drop their desktop min-widths at the same breakpoint. Form controls are
-  forced to 16px so iOS does not zoom the page when a field takes focus.
+- Header, coverage card and both modals tighten their spacing at the same
+  breakpoint, and the cards below the board (hours tracking, checklist, roster)
+  stack instead of sharing a row. Three `flex:1` cards with `min-width:0` never
+  wrap — they squeeze to roughly 120px each and their contents overflow, which
+  in mobile browsers widens the layout viewport and pushes fixed overlays
+  partly off-screen. Form controls are forced to 16px so iOS does not zoom the
+  page when a field takes focus.
 
 Managers create a shift the same way in both: tapping an empty position in a
 day column opens the editor at that hour.
@@ -132,6 +136,22 @@ day, exactly as the prototype modelled it. A unique index over
 `(week_start, day_of_week, start_minute, end_minute, caregiver_id)` rejects
 duplicate shifts from double taps or a retried request.
 
+**`checklist_items`**
+
+| column | type | notes |
+| --- | --- | --- |
+| `id` | `uuid` | primary key |
+| `body` | `text` | non-blank, 300 characters or fewer |
+| `done` | `boolean` | ticked or open |
+| `created_by` / `done_by` | `uuid` | `REFERENCES caregivers ON DELETE SET NULL` |
+| `done_at` | `timestamptz` | set on the tick, cleared when reopened |
+| `position` | `integer` | order of the open list |
+| `version` | `integer` | conflict detection |
+
+A check constraint keeps `done_at`/`done_by` empty on an open item, so a
+reopened task can never show a stale signature. Removing a caregiver nulls the
+reference rather than deleting their tasks.
+
 **`sync_revision`** — a single row holding a monotonic counter. Statement-level
 triggers on `caregivers` and `shifts` bump it and `pg_notify` the new value.
 
@@ -166,6 +186,11 @@ All routes are under `/api/mommy`. Mutations require a manager session.
 | `PATCH` | `/shifts/:id` | manager | edit a shift |
 | `DELETE` | `/shifts/:id` | manager | delete a shift |
 | `POST` | `/weeks/:week/copy-previous` | manager | replace a week with a copy of the one before |
+| `GET` | `/checklist` | read | the shared checklist |
+| `POST` | `/checklist` | **read** | add a task |
+| `PATCH` | `/checklist/:id` | **read** (text: manager) | tick, untick or reword |
+| `DELETE` | `/checklist/:id` | manager | remove a task |
+| `POST` | `/checklist/clear-done` | manager | remove every completed task |
 | `GET` | `/healthz` (root, not under `/api`) | public | liveness + database check |
 
 Notes and messages are fields on a shift, so they persist through the same
@@ -183,6 +208,33 @@ rate field.
 Error codes are stable strings: `invalid_code`, `manager_required`,
 `access_code_required`, `invalid_week`, `stale_version`, `duplicate`,
 `caregiver_not_found`, `shift_not_found`, `too_many_attempts`.
+
+## Shared checklist
+
+A running list of tasks for the care team — medication to buy, an appointment to
+book — separate from the per-shift notes, which belong to one shift.
+
+The point of it is that a caregiver mid-shift can hand work over **without the
+manager code**, so `POST /checklist` and ticking through `PATCH /checklist/:id`
+are open to anyone who can read the board. That is a deliberate widening of the
+write surface, bounded on every side:
+
+- Only additive actions are public. Deleting a task, clearing the completed ones
+  and rewording an existing task are manager-only, so the worst an anonymous
+  writer can do is add noise, never destroy the list.
+- Public writes are throttled to 60 per IP per 5 minutes, the list is capped at
+  300 items, and a task is capped at 300 characters.
+- Nothing else opened up: caregivers and shifts still reject every write without
+  a manager session.
+
+Tasks are attributed when the writer has said who they are. The choice sits in
+a picker on the card and is remembered per device in `localStorage` — a viewer
+preference, not shared state, so it never becomes a second source of truth.
+Ticking records who and when; unticking clears both. A caregiver removed from
+the roster leaves their tasks in place, unattributed.
+
+Checklist changes travel over the same revision counter and SSE stream as the
+schedule, so a task added on one phone appears on the others without a reload.
 
 ## Authentication
 

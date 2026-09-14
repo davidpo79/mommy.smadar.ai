@@ -49,6 +49,11 @@ export const api = {
   updateShift: (id, payload) => request('PATCH', `/shifts/${id}`, payload),
   deleteShift: (id) => request('DELETE', `/shifts/${id}`),
 
+  createChecklistItem: (payload) => request('POST', '/checklist', payload),
+  updateChecklistItem: (id, payload) => request('PATCH', `/checklist/${id}`, payload),
+  deleteChecklistItem: (id) => request('DELETE', `/checklist/${id}`),
+  clearDoneChecklist: () => request('POST', '/checklist/clear-done'),
+
   copyPreviousWeek: (week) =>
     request('POST', `/weeks/${encodeURIComponent(week)}/copy-previous`),
 };

@@ -151,6 +151,38 @@ export function resetThrottle(req) {
   attempts.delete(clientIp(req) || 'unknown');
 }
 
+// ---------------------------------------------------------------------------
+// The checklist accepts writes from anyone who can read the board, so it gets
+// its own, far looser budget: enough for a busy handover, little enough that a
+// leaked link cannot be used to flood the table.
+// ---------------------------------------------------------------------------
+const writes = new Map();
+const WRITE_WINDOW_MS = 5 * 60 * 1000;
+const MAX_WRITES = 60;
+
+export function throttlePublicWrites(req, res, next) {
+  const key = clientIp(req) || 'unknown';
+  const now = Date.now();
+  const record = writes.get(key);
+  if (!record || now - record.first > WRITE_WINDOW_MS) {
+    writes.set(key, { first: now, count: 1 });
+    return next();
+  }
+  record.count += 1;
+  if (record.count > MAX_WRITES) {
+    console.warn(`[checklist] write throttled ip=${key} writes=${record.count}`);
+    return res.status(429).json({ error: 'too_many_writes' });
+  }
+  return next();
+}
+
+setInterval(() => {
+  const cutoff = Date.now() - WRITE_WINDOW_MS;
+  for (const [key, value] of writes) {
+    if (value.first < cutoff) writes.delete(key);
+  }
+}, WRITE_WINDOW_MS).unref();
+
 // Periodically drop stale throttle entries so the map cannot grow unbounded.
 setInterval(() => {
   const cutoff = Date.now() - WINDOW_MS;
