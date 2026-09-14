@@ -1,0 +1,28 @@
+{
+  "name": "mommy-care",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Mommy Care - shared caregiver scheduling for round-the-clock family care",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "migrate": "node server/migrate.js",
+    "seed": "node server/seed.js",
+    "start": "node server/index.js",
+    "dev": "node scripts/build.mjs --watch & node --watch server/index.js"
+  },
+  "dependencies": {
+    "cookie": "^1.0.2",
+    "express": "^4.21.2",
+    "pg": "^8.13.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.2"
+  }
+}
