@@ -516,6 +516,27 @@ export default function App() {
     [load, reportError]
   );
 
+  const addPersonFromEditor = async (event) => {
+    event.preventDefault();
+    const name = newName.trim();
+    if (!name) return;
+    setBusy(true);
+    try {
+      const created = await api.createCaregiver({
+        name,
+        paid: newPaid,
+        rate: newPaid ? 50 : 0,
+      });
+      setNewName('');
+      patchDraft({ caregiverId: created.id });
+      await load(weekRef.current);
+    } catch (err) {
+      reportError(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const addPerson = async (event) => {
     event.preventDefault();
     const name = newName.trim();
@@ -1083,23 +1104,59 @@ export default function App() {
               <div style={css('display:flex;flex-direction:column;gap:15px;')}>
                 <div style={css('display:flex;flex-direction:column;gap:7px;')}>
                   <div style={css('font-size:13px;color:#8a8073;')}>מי מלווה</div>
-                  <div style={css('display:flex;flex-wrap:wrap;gap:7px;')}>
-                    {caregivers.map((person) => {
-                      const picked = draftView.caregiverId === person.id;
-                      const t = toneFor(person.id);
-                      return (
+                  {caregivers.length === 0 ? (
+                    /* Without this the label sits above an empty gap with no
+                       hint that the roster, not the app, is the problem. */
+                    <div
+                      data-roster-empty=""
+                      style={css('display:flex;flex-direction:column;gap:9px;background:#f5f2ec;border:1px solid #e4ddd3;border-radius:12px;padding:12px;')}
+                    >
+                      <span style={css('font-size:13.5px;color:#6f6659;line-height:1.5;')}>
+                        עדיין אין מלווים ברשימה, ולכן אין את מי לשבץ. אפשר להוסיף כאן.
+                      </span>
+                      <form onSubmit={addPersonFromEditor} style={css('display:flex;flex-wrap:wrap;gap:8px;align-items:center;')}>
+                        <input
+                          value={newName}
+                          onChange={(e) => setNewName(e.target.value)}
+                          placeholder="שם מלווה"
+                          style={css('flex:1;min-width:120px;border:1px solid #d4ccc0;background:#fff;border-radius:999px;padding:8px 13px;font-size:14px;color:#26221e;')}
+                        />
+                        <div style={css('display:flex;gap:4px;background:#ece7df;padding:4px;border-radius:999px;')}>
+                          <button type="button" onClick={() => setNewPaid(false)} style={css(roleBtn(!newPaid))}>
+                            משפחה
+                          </button>
+                          <button type="button" onClick={() => setNewPaid(true)} style={css(roleBtn(newPaid))}>
+                            בתשלום
+                          </button>
+                        </div>
                         <button
-                          key={person.id}
-                          onClick={() => patchDraft({ caregiverId: picked ? null : person.id })}
-                          style={css(
-                            `${CHIP}background:${picked ? t.bg : '#fdfcfa'};border:1px solid ${picked ? t.border : '#d4ccc0'};color:#26221e;`
-                          )}
+                          type="submit"
+                          disabled={busy}
+                          style={css('border:none;background:#26221e;color:#f6f3ee;border-radius:999px;padding:9px 16px;font-size:14px;cursor:pointer;')}
                         >
-                          {person.name}
+                          הוספה
                         </button>
-                      );
-                    })}
-                  </div>
+                      </form>
+                    </div>
+                  ) : (
+                    <div style={css('display:flex;flex-wrap:wrap;gap:7px;')}>
+                      {caregivers.map((person) => {
+                        const picked = draftView.caregiverId === person.id;
+                        const t = toneFor(person.id);
+                        return (
+                          <button
+                            key={person.id}
+                            onClick={() => patchDraft({ caregiverId: picked ? null : person.id })}
+                            style={css(
+                              `${CHIP}background:${picked ? t.bg : '#fdfcfa'};border:1px solid ${picked ? t.border : '#d4ccc0'};color:#26221e;`
+                            )}
+                          >
+                            {person.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
 
                 <div style={css('display:flex;gap:10px;flex-wrap:wrap;')}>
