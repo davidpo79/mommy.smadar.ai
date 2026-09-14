@@ -245,8 +245,15 @@ Railway project **`ibda-webinar`**, environment **`production`**.
 
 | service | kind | notes |
 | --- | --- | --- |
-| `mommy-web` | this repository | build `npm ci && npm run build`, start `npm start` |
+| `mommy-web` | this repository | Nixpacks; build `npm run build`, start `npm start` |
 | `mommy-postgres` | `ghcr.io/railwayapp-templates/postgres-ssl:18` | dedicated volume `mommy-postgres-volume` |
+
+`mommy-web` deploys from the branch configured on the service. Nixpacks runs
+`npm ci` itself, so `railway.json` only adds `npm run build` — running `npm ci`
+again in the build phase collides with the cache Nixpacks mounts at
+`node_modules/.cache`. `esbuild` is a runtime dependency rather than a dev
+dependency for the same reason: `NODE_ENV=production` makes `npm ci` skip
+devDependencies, and esbuild is what produces the deployed bundle.
 
 Both are new, isolated services. The pre-existing `web`, `Postgres` and
 `sumit-diag-temp` services, their variables, volumes and domains are untouched,
@@ -262,11 +269,34 @@ database connection before Railway routes traffic to a new deployment.
 
 ## Domain configuration
 
-`mommy.smadar.ai` is attached as a custom domain on `mommy-web`. Railway issues
-the certificate once DNS resolves. The required record is reported by
-`domain-status` on the service; it is a `CNAME` from `mommy.smadar.ai` to the
-Railway-provided target. Existing domains in the project — including
-`webinar.braingy.ai` — are unchanged.
+`mommy.smadar.ai` is attached as a custom domain on `mommy-web`, alongside the
+generated `mommy-web-production.up.railway.app`.
+
+| record | host | value |
+| --- | --- | --- |
+| `CNAME` | `mommy` (in the `smadar.ai` zone) | `p60qyt8a.up.railway.app` |
+
+Railway reports this record as propagated and the certificate as valid. If the
+domain is ever recreated, Railway issues a **different** CNAME target — read it
+from the service's domain settings rather than reusing the value above.
+
+Existing domains in the project — including `webinar.braingy.ai` on the `web`
+service — are unchanged.
+
+## Verifying a deployment
+
+`scripts/smoke-test.sh` exercises a running deployment end to end: the public
+team view, a rejected wrong code, manager login, every mutation, week
+navigation, copy-previous-week, and the SSE stream. It also checks that the
+manager code appears in neither the HTML nor the JavaScript bundle.
+
+```bash
+BASE=https://mommy.smadar.ai MANAGER_CODE=<code> ./scripts/smoke-test.sh
+```
+
+It writes while it runs, then deletes every row it created and asserts the
+caregiver and shift counts are back where they started, so it is safe to point
+at production. It exits non-zero if any check fails.
 
 ## Observability
 
