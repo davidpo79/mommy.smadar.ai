@@ -13,7 +13,7 @@ import {
   throttleAuth,
 } from './auth.js';
 import { syncHub } from './sync.js';
-import { addWeeks, currentWeekStart, normalizeWeek, weekDates } from './week.js';
+import { addWeeks, currentDate, currentWeekStart, normalizeWeek, weekDates } from './week.js';
 import { serializeCaregiver, serializeShift } from './serialize.js';
 import {
   HttpError,
@@ -52,6 +52,9 @@ async function loadState(week, { isManager }) {
     revision,
     timezone: config.timezone,
     serverTime: new Date().toISOString(),
+    // Today in APP_TIMEZONE, so the client never has to trust the device clock
+    // to decide which day to open on.
+    today: currentDate(),
     isManager,
     teamGated: isTeamGated(),
     week,

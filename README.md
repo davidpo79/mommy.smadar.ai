@@ -63,6 +63,27 @@ styles were carried over verbatim: `client/src/css.js` turns the prototype's CSS
 strings into React style objects so the design did not have to be re-typed and
 could not drift.
 
+### Two layouts
+
+Every style in this app is inline, so the breakpoint is a `matchMedia` check in
+JavaScript (`client/src/useViewport.js`) rather than a CSS media query. Below
+760px the page switches to a phone layout:
+
+- The 7 x 24 wall grid becomes a scrollable day picker plus the selected day's
+  shifts as full-width cards. Each pill shows that day's covered hours (`4/24`,
+  or `מלא`), so gaps are still visible at a glance across the week.
+- Uncovered stretches are listed explicitly under the day's shifts, which is
+  the job the empty space in the grid was doing on a large screen.
+- The day picker opens on today whenever the week on screen contains it. The
+  date comes from the server in `APP_TIMEZONE`, not from the device clock.
+- Managers get a full-width "add a shift to this day" button in place of
+  clicking a position in a column.
+
+Both layouts use the same data, the same components for the roster, hours
+tracking and editor, and the same colours and confirmation styling. Form
+controls are forced to 16px below the breakpoint so iOS does not zoom the page
+when a field takes focus.
+
 ## Data model
 
 Three tables, defined in `server/migrations/001_init.sql`.

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { css } from './css.js';
 import { api, ApiError } from './api.js';
 import { useSync } from './useSync.js';
+import { useIsNarrow } from './useViewport.js';
 
 const DAYS = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'];
 const HOUR_PX = 34;
@@ -64,6 +65,129 @@ const TIME_OPTIONS = Array.from({ length: 48 }, (_, i) => ({
   label: hhmm(i * 30),
 }));
 
+
+/**
+ * Narrow-screen schedule. The 7x24 wall grid is unusable on a phone, so the
+ * week becomes a day picker plus the selected day's shifts as cards, keeping
+ * the same colours, pills and confirmation styling as the desktop board.
+ * Uncovered stretches are listed explicitly, since spotting a gap by eye is
+ * exactly what the grid was doing for you on a large screen.
+ */
+function MobileSchedule({ days, selected, onSelect, manager, toneFor, onAdd, onOpen }) {
+  const activePill = useRef(null);
+  const day = days[selected] || days[0];
+
+  // The strip scrolls, so keep the chosen day on screen - otherwise opening on
+  // today can leave the highlighted pill off the edge.
+  useEffect(() => {
+    activePill.current?.scrollIntoView({ block: 'nearest', inline: 'center' });
+  }, [selected]);
+
+  if (!day) return null;
+  const coveredH = Math.round((day.covered / 60) * 10) / 10;
+
+  return (
+    <div style={css('display:flex;flex-direction:column;gap:12px;')}>
+      <div style={css('display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;margin:0 -4px;padding-inline:4px;')}>
+        {days.map((d) => {
+          const on = d.dayIdx === day.dayIdx;
+          const full = d.covered >= 1440;
+          return (
+            <button
+              key={`pick-${d.dayIdx}`}
+              ref={on ? activePill : null}
+              onClick={() => onSelect(d.dayIdx)}
+              style={css(
+                `flex:none;min-width:62px;padding:8px 6px;border-radius:12px;cursor:pointer;text-align:center;font-family:Heebo, sans-serif;` +
+                  (on
+                    ? 'background:#26221e;color:#f6f3ee;border:1px solid #26221e;'
+                    : 'background:#efeae2;color:#45403a;border:1px solid #e4ddd3;')
+              )}
+            >
+              <span style={css('display:block;font-size:14px;font-weight:700;')}>{d.name}</span>
+              <span style={css(`display:block;font-size:11.5px;margin-top:1px;font-variant-numeric:tabular-nums;color:${on ? '#cfc6b8' : '#8a8073'};`)}>
+                {d.date}
+              </span>
+              <span style={css(`display:block;font-size:11px;margin-top:2px;color:${on ? '#cfc6b8' : full ? 'oklch(0.6 0.09 150)' : '#a1978a'};`)}>
+                {full ? 'מלא' : `${Math.round(d.covered / 60)}/24`}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      <div style={css('display:flex;justify-content:space-between;align-items:baseline;gap:10px;')}>
+        <span style={css("font-family:'Heebo', sans-serif;font-size:17px;font-weight:700;")}>
+          {`יום ${day.name} · ${day.date}`}
+        </span>
+        <span style={css('font-size:13px;color:#8a8073;font-variant-numeric:tabular-nums;')}>
+          {`${coveredH} מתוך 24 ש׳`}
+        </span>
+      </div>
+
+      <div style={css('display:flex;flex-direction:column;gap:8px;')}>
+        {day.pieces.length === 0 ? (
+          <div style={css('font-size:14px;color:#8a8073;line-height:1.55;background:#fdfcfa;border:1px dashed #ded7cc;border-radius:12px;padding:16px;text-align:center;')}>
+            אין עדיין שיבוץ ליום הזה.
+          </div>
+        ) : null}
+
+        {day.pieces.map((piece, index) => {
+          const shift = piece.shift;
+          const tone = shift.caregiverId ? toneFor(shift.caregiverId) : NEUTRAL_TONE;
+          return (
+            <button
+              key={`${shift.id}-${index}`}
+              onClick={() => onOpen(shift)}
+              style={css(
+                `text-align:right;width:100%;padding:12px 14px;border-radius:12px;cursor:pointer;display:flex;flex-direction:column;gap:3px;color:#26221e;font-family:Assistant, sans-serif;` +
+                  `background:${shift.confirmed ? tone.bg : `repeating-linear-gradient(135deg,${tone.bg} 0 7px, #fdfcfa 7px 14px)`};` +
+                  `border:1px solid ${tone.border};`
+              )}
+            >
+              <span style={css('font-size:12.5px;color:#6f6659;font-variant-numeric:tabular-nums;')}>
+                {`${piece.cont ? 'המשך · ' : ''}${hhmm(shift.start)}–${hhmm(shift.end)} · ${hoursLabel(shiftLen(shift))}`}
+              </span>
+              <span style={css("font-family:'Heebo', sans-serif;font-size:16px;font-weight:500;line-height:1.25;")}>
+                {shift.person || 'ללא שם'}
+              </span>
+              {shift.note ? (
+                <span style={css('font-size:13.5px;color:#5f574c;line-height:1.4;')}>{shift.note}</span>
+              ) : null}
+              {shift.msg ? (
+                <span style={css(`font-size:13px;line-height:1.4;margin-top:2px;color:${tone.strong};border-right:2px solid ${tone.strong};padding-right:6px;`)}>
+                  {`מיפעת: ${shift.msg}`}
+                </span>
+              ) : null}
+              {!shift.confirmed ? (
+                <span style={css('font-size:12px;color:#8a8073;margin-top:2px;')}>ממתין לאישור</span>
+              ) : null}
+            </button>
+          );
+        })}
+
+        {day.gaps.map((gap) => (
+          <div
+            key={`gap-${gap.from}`}
+            style={css('font-size:13px;color:#8a8073;background:#f7f3ed;border:1px dashed #ded7cc;border-radius:10px;padding:9px 12px;font-variant-numeric:tabular-nums;')}
+          >
+            {`לא מאויש · ${hhmm(gap.from)}–${gap.to === 1440 ? '24:00' : hhmm(gap.to)}`}
+          </div>
+        ))}
+      </div>
+
+      {manager ? (
+        <button
+          onClick={() => onAdd(day.dayIdx)}
+          style={css('border:none;background:#26221e;color:#f6f3ee;padding:12px 16px;border-radius:12px;font-size:15px;cursor:pointer;font-family:Heebo, sans-serif;')}
+        >
+          {`+ הוספת משמרת ליום ${day.name}`}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 export default function App() {
   const [boot, setBoot] = useState({ status: 'loading', error: '' });
   const [data, setData] = useState(null);
@@ -82,6 +206,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState('');
 
+  const [mobileDay, setMobileDay] = useState(0);
   const revisionRef = useRef(0);
   const weekRef = useRef(null);
   weekRef.current = week;
@@ -145,6 +270,14 @@ export default function App() {
     load(week).catch(reportError);
   }, [week, data, load, reportError]);
 
+  // On a phone only one day is on screen, so open on today whenever the week
+  // being viewed contains it. `today` comes from the server in APP_TIMEZONE.
+  useEffect(() => {
+    if (!data?.today || !data?.dates) return;
+    const index = data.dates.indexOf(data.today);
+    setMobileDay(index === -1 ? 0 : index);
+  }, [data?.today, data?.week]);
+
   const refresh = useCallback(() => {
     // Do not yank the schedule out from under an open editor; the refresh
     // happens when the editor closes instead.
@@ -158,6 +291,7 @@ export default function App() {
     onStale: refresh,
   });
 
+  const isNarrow = useIsNarrow();
   const manager = Boolean(data?.isManager) && !previewTeam;
 
   const caregivers = data?.caregivers ?? [];
@@ -192,12 +326,19 @@ export default function App() {
     const gaps = [];
     const built = DAYS.map((name, dayIdx) => {
       const raw = byDay[dayIdx].slice().sort((a, b) => a.from - b.from || a.to - b.to);
+      const dayGaps = [];
       let cursor = 0;
       raw.forEach((p) => {
-        if (p.from > cursor) gaps.push(`${name} ${hhmm(cursor)}–${hhmm(p.from)}`);
+        if (p.from > cursor) {
+          gaps.push(`${name} ${hhmm(cursor)}–${hhmm(p.from)}`);
+          dayGaps.push({ from: cursor, to: p.from });
+        }
         cursor = Math.max(cursor, p.to);
       });
-      if (cursor < 1440) gaps.push(`${name} ${hhmm(cursor)}–24:00`);
+      if (cursor < 1440) {
+        gaps.push(`${name} ${hhmm(cursor)}–24:00`);
+        dayGaps.push({ from: cursor, to: 1440 });
+      }
 
       let merged = 0;
       let mEnd = 0;
@@ -209,6 +350,7 @@ export default function App() {
         }
       });
       covered += merged;
+      const dayCovered = merged;
 
       const lanes = [];
       const pieces = raw.map((p) => {
@@ -223,7 +365,16 @@ export default function App() {
       });
       const laneCount = Math.max(1, lanes.length);
 
-      return { name, dayIdx, date: dayLabel(dates[dayIdx]), pieces, laneCount };
+      return {
+        name,
+        dayIdx,
+        date: dayLabel(dates[dayIdx]),
+        iso: dates[dayIdx],
+        pieces,
+        laneCount,
+        gaps: dayGaps,
+        covered: dayCovered,
+      };
     });
 
     return { days: built, coveredMin: covered, gapText: gaps };
@@ -530,7 +681,7 @@ export default function App() {
     caregivers.find((p) => p.id === draftView.caregiverId)?.name || '';
 
   return (
-    <div dir="rtl" style={css('min-height:100vh;padding:26px 20px 70px;color:#26221e;')}>
+    <div dir="rtl" style={css(`min-height:100vh;padding:${isNarrow ? '16px 14px 56px' : '26px 20px 70px'};color:#26221e;`)}>
       {toast ? (
         <div style={css('position:fixed;top:14px;left:50%;transform:translateX(-50%);background:#26221e;color:#f6f3ee;padding:9px 18px;border-radius:999px;font-size:14px;z-index:60;box-shadow:0 10px 30px rgba(38,34,30,.25);')}>
           {toast}
@@ -538,7 +689,7 @@ export default function App() {
       ) : null}
 
       <div style={css('max-width:1280px;margin:0 auto;display:flex;flex-direction:column;gap:18px;')}>
-        <header style={css('display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end;justify-content:space-between;border-bottom:1px solid #ded7cc;padding-bottom:16px;')}>
+        <header style={css(`display:flex;flex-wrap:wrap;gap:${isNarrow ? '12px' : '16px'};align-items:${isNarrow ? 'flex-start' : 'flex-end'};justify-content:space-between;border-bottom:1px solid #ded7cc;padding-bottom:${isNarrow ? '12px' : '16px'};`)}>
           <div style={css('display:flex;flex-direction:column;gap:5px;')}>
             <div style={css('display:flex;gap:9px;align-items:center;')}>
               <span style={css("font-family:'Heebo', sans-serif;font-size:12px;letter-spacing:0.14em;color:#8a8073;")}>
@@ -548,7 +699,7 @@ export default function App() {
                 {manager ? 'תצוגת יפעת' : 'תצוגת מלווים'}
               </span>
             </div>
-            <h1 style={css("margin:0;font-family:'Heebo', sans-serif;font-size:29px;font-weight:700;letter-spacing:-0.01em;")}>
+            <h1 style={css(`margin:0;font-family:'Heebo', sans-serif;font-size:${isNarrow ? '22px' : '29px'};font-weight:700;letter-spacing:-0.01em;`)}>
               רפואה שלמה במהרה לאמא
             </h1>
             <div style={css('font-size:15px;color:#6f6659;')}>
@@ -580,12 +731,12 @@ export default function App() {
           </div>
         </header>
 
-        <section style={css('display:flex;flex-wrap:wrap;gap:16px;align-items:center;background:#fdfcfa;border:1px solid #e4ddd3;border-radius:14px;padding:14px 18px;')}>
-          <div style={css('display:flex;flex-direction:column;gap:1px;min-width:138px;')}>
+        <section style={css(`display:flex;flex-wrap:wrap;gap:${isNarrow ? '10px' : '16px'};align-items:center;background:#fdfcfa;border:1px solid #e4ddd3;border-radius:14px;padding:14px ${isNarrow ? '14px' : '18px'};`)}>
+          <div style={css(`display:flex;flex-direction:column;gap:1px;min-width:${isNarrow ? '0' : '138px'};`)}>
             <div style={css("font-family:'Heebo', sans-serif;font-size:21px;font-weight:700;")}>{missingH} שעות</div>
             <div style={css('font-size:13px;color:#8a8073;')}>שעות עוד חסרות מתוך 168</div>
           </div>
-          <div style={css('flex:1;min-width:170px;height:10px;background:#eae4db;border-radius:999px;overflow:hidden;')}>
+          <div style={css(`flex:1;min-width:${isNarrow ? '120px' : '170px'};height:10px;background:#eae4db;border-radius:999px;overflow:hidden;`)}>
             <div style={css(`height:100%;width:${pct}%;background:${ACCENT};border-radius:999px;transition:width .3s;`)} />
           </div>
           <div style={css('font-size:14px;color:#6f6659;line-height:1.5;max-width:520px;')}>
@@ -595,6 +746,33 @@ export default function App() {
           </div>
         </section>
 
+        {isNarrow ? (
+          <MobileSchedule
+            days={days}
+            selected={mobileDay}
+            onSelect={setMobileDay}
+            manager={manager}
+            toneFor={toneFor}
+            onOpen={(shift) => {
+              setDraftError('');
+              setDraft({ ...shift, isNew: false });
+            }}
+            onAdd={(dayIdx) => {
+              setDraftError('');
+              setDraft({
+                isNew: true,
+                week,
+                day: dayIdx,
+                start: 480,
+                end: 720,
+                caregiverId: null,
+                note: '',
+                msg: '',
+                confirmed: false,
+              });
+            }}
+          />
+        ) : (
         <div style={css('overflow-x:auto;padding-bottom:8px;')}>
           <div style={css('min-width:980px;display:grid;grid-template-columns:62px repeat(7, minmax(0, 1fr));gap:6px;')}>
             <div />
@@ -698,10 +876,11 @@ export default function App() {
             ))}
           </div>
         </div>
+        )}
 
         <section style={css('display:flex;flex-wrap:wrap;gap:18px;align-items:stretch;')}>
           {manager ? (
-            <div style={css('flex:1;min-width:330px;background:#fdfcfa;border:1px solid #e4ddd3;border-radius:14px;padding:16px 18px;display:flex;flex-direction:column;gap:12px;')}>
+            <div style={css(`flex:1;min-width:${isNarrow ? '0' : '330px'};background:#fdfcfa;border:1px solid #e4ddd3;border-radius:14px;padding:16px ${isNarrow ? '14px' : '18px'};display:flex;flex-direction:column;gap:12px;`)}>
               <div style={css('display:flex;justify-content:space-between;align-items:baseline;gap:10px;')}>
                 <div style={css("font-family:'Heebo', sans-serif;font-size:17px;font-weight:700;")}>מעקב שעות</div>
                 <div style={css('font-size:12px;color:#8a8073;')}>גלוי ליפעת בלבד</div>
@@ -752,7 +931,7 @@ export default function App() {
             </div>
           ) : null}
 
-          <div style={css('flex:1;min-width:300px;display:flex;flex-direction:column;gap:12px;')}>
+          <div style={css(`flex:1;min-width:${isNarrow ? '0' : '300px'};display:flex;flex-direction:column;gap:12px;`)}>
             <div style={css('font-size:13px;color:#8a8073;')}>מלווים</div>
             <div style={css('display:flex;flex-wrap:wrap;gap:8px;align-items:center;')}>
               {caregivers.map((person) => {
@@ -885,12 +1064,12 @@ export default function App() {
       {draft ? (
         <div
           onClick={closeEditor}
-          style={css('position:fixed;inset:0;background:rgba(38, 34, 30, 0.34);display:flex;align-items:center;justify-content:center;padding:20px;z-index:40;')}
+          style={css(`position:fixed;inset:0;background:rgba(38, 34, 30, 0.34);display:flex;align-items:center;justify-content:center;padding:${isNarrow ? '10px' : '20px'};z-index:40;`)}
         >
           <div
             onClick={(e) => e.stopPropagation()}
             dir="rtl"
-            style={css('background:#fdfcfa;border-radius:18px;padding:22px;width:100%;max-width:460px;max-height:88vh;overflow-y:auto;display:flex;flex-direction:column;gap:15px;box-shadow:0 24px 60px rgba(38, 34, 30, 0.26);')}
+            style={css(`background:#fdfcfa;border-radius:18px;padding:${isNarrow ? '16px' : '22px'};width:100%;max-width:460px;max-height:${isNarrow ? '92vh' : '88vh'};overflow-y:auto;display:flex;flex-direction:column;gap:15px;box-shadow:0 24px 60px rgba(38, 34, 30, 0.26);`)}
           >
             <div style={css('display:flex;justify-content:space-between;align-items:flex-start;gap:12px;')}>
               <div style={css("font-family:'Heebo', sans-serif;font-size:20px;font-weight:700;")}>

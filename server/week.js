@@ -27,6 +27,12 @@ function partsInTimezone(date, timeZone) {
 const iso = (y, m, d) =>
   `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
 
+/** Today's ISO date (YYYY-MM-DD) as seen in the app's timezone. */
+export function currentDate(now = new Date(), timeZone = config.timezone) {
+  const { year, month, day } = partsInTimezone(now, timeZone);
+  return iso(year, month, day);
+}
+
 /** ISO date (YYYY-MM-DD) of the Sunday that starts the current week. */
 export function currentWeekStart(now = new Date(), timeZone = config.timezone) {
   const { year, month, day, weekday } = partsInTimezone(now, timeZone);

@@ -21,6 +21,11 @@
   a { color: oklch(0.52 0.08 232); }
   a:hover { color: oklch(0.42 0.08 232); }
   input, button, select, textarea { font-family: inherit; }
+  body { -webkit-text-size-adjust: 100%; }
+  @media (max-width: 760px) {
+    /* iOS zooms the page when a focused control is under 16px. */
+    input, select, textarea { font-size: 16px !important; }
+  }
 </style>
 </head>
 <body>
