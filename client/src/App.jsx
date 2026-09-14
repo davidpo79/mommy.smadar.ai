@@ -1,8 +1,8 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { css } from './css.js';
 import { api, ApiError } from './api.js';
 import { useSync } from './useSync.js';
-import { useIsNarrow } from './useViewport.js';
+import { hourHeightFor, useViewport } from './useViewport.js';
 
 const DAYS = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'];
 const HOUR_PX = 34;
@@ -73,120 +73,200 @@ const TIME_OPTIONS = Array.from({ length: 48 }, (_, i) => ({
  * Uncovered stretches are listed explicitly, since spotting a gap by eye is
  * exactly what the grid was doing for you on a large screen.
  */
-function MobileSchedule({ days, selected, onSelect, manager, toneFor, onAdd, onOpen }) {
-  const activePill = useRef(null);
-  const day = days[selected] || days[0];
+/**
+ * The week board: seven day columns over a 24-hour track, shared by both
+ * layouts. `compact` shrinks every dimension so the whole week and the whole
+ * day fit a phone screen at once - the narrow layout deliberately keeps the
+ * full grid rather than paging through days, so gaps stay visible at a glance.
+ * `hourPx` is what actually scales it, and the caller derives it from the
+ * viewport height.
+ */
+function WeekGrid({ days, manager, toneFor, hourPx, compact, today, trackRef, onAdd, onOpen }) {
+  const trackHeight = hourPx * 24;
 
-  // The strip scrolls, so keep the chosen day on screen - otherwise opening on
-  // today can leave the highlighted pill off the edge.
-  useEffect(() => {
-    activePill.current?.scrollIntoView({ block: 'nearest', inline: 'center' });
-  }, [selected]);
-
-  if (!day) return null;
-  const coveredH = Math.round((day.covered / 60) * 10) / 10;
+  const hourMarks = [];
+  for (let h = 0; h <= 24; h += 2) {
+    hourMarks.push({
+      label: h === 24 ? '24:00' : hhmm(h * 60),
+      top: h * hourPx - (compact ? 5 : 8),
+    });
+  }
 
   return (
-    <div style={css('display:flex;flex-direction:column;gap:12px;')}>
-      <div style={css('display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;margin:0 -4px;padding-inline:4px;')}>
-        {days.map((d) => {
-          const on = d.dayIdx === day.dayIdx;
-          const full = d.covered >= 1440;
+    <div style={css(compact ? 'padding-bottom:4px;' : 'overflow-x:auto;padding-bottom:8px;')}>
+      <div
+        style={css(
+          `${compact ? '' : 'min-width:980px;'}display:grid;` +
+            `grid-template-columns:${compact ? '27px' : '62px'} repeat(7, minmax(0, 1fr));` +
+            `gap:${compact ? '2px' : '6px'};`
+        )}
+      >
+        <div />
+        {days.map((day) => {
+          const isToday = day.iso === today;
           return (
-            <button
-              key={`pick-${d.dayIdx}`}
-              ref={on ? activePill : null}
-              onClick={() => onSelect(d.dayIdx)}
+            <div
+              key={`head-${day.dayIdx}`}
               style={css(
-                `flex:none;min-width:62px;padding:8px 6px;border-radius:12px;cursor:pointer;text-align:center;font-family:Heebo, sans-serif;` +
-                  (on
-                    ? 'background:#26221e;color:#f6f3ee;border:1px solid #26221e;'
-                    : 'background:#efeae2;color:#45403a;border:1px solid #e4ddd3;')
+                `text-align:center;padding:${compact ? '4px 1px 0' : '7px 4px'};border-radius:${compact ? '7px' : '10px'};` +
+                  `background:${isToday ? '#e2dacd' : '#efeae2'};overflow:hidden;`
               )}
             >
-              <span style={css('display:block;font-size:14px;font-weight:700;')}>{d.name}</span>
-              <span style={css(`display:block;font-size:11.5px;margin-top:1px;font-variant-numeric:tabular-nums;color:${on ? '#cfc6b8' : '#8a8073'};`)}>
-                {d.date}
-              </span>
-              <span style={css(`display:block;font-size:11px;margin-top:2px;color:${on ? '#cfc6b8' : full ? 'oklch(0.6 0.09 150)' : '#a1978a'};`)}>
-                {full ? 'מלא' : `${Math.round(d.covered / 60)}/24`}
-              </span>
-            </button>
-          );
-        })}
-      </div>
-
-      <div style={css('display:flex;justify-content:space-between;align-items:baseline;gap:10px;')}>
-        <span style={css("font-family:'Heebo', sans-serif;font-size:17px;font-weight:700;")}>
-          {`יום ${day.name} · ${day.date}`}
-        </span>
-        <span style={css('font-size:13px;color:#8a8073;font-variant-numeric:tabular-nums;')}>
-          {`${coveredH} מתוך 24 ש׳`}
-        </span>
-      </div>
-
-      <div style={css('display:flex;flex-direction:column;gap:8px;')}>
-        {day.pieces.length === 0 ? (
-          <div style={css('font-size:14px;color:#8a8073;line-height:1.55;background:#fdfcfa;border:1px dashed #ded7cc;border-radius:12px;padding:16px;text-align:center;')}>
-            אין עדיין שיבוץ ליום הזה.
-          </div>
-        ) : null}
-
-        {day.pieces.map((piece, index) => {
-          const shift = piece.shift;
-          const tone = shift.caregiverId ? toneFor(shift.caregiverId) : NEUTRAL_TONE;
-          return (
-            <button
-              key={`${shift.id}-${index}`}
-              onClick={() => onOpen(shift)}
-              style={css(
-                `text-align:right;width:100%;padding:12px 14px;border-radius:12px;cursor:pointer;display:flex;flex-direction:column;gap:3px;color:#26221e;font-family:Assistant, sans-serif;` +
-                  `background:${shift.confirmed ? tone.bg : `repeating-linear-gradient(135deg,${tone.bg} 0 7px, #fdfcfa 7px 14px)`};` +
-                  `border:1px solid ${tone.border};`
-              )}
-            >
-              <span style={css('font-size:12.5px;color:#6f6659;font-variant-numeric:tabular-nums;')}>
-                {`${piece.cont ? 'המשך · ' : ''}${hhmm(shift.start)}–${hhmm(shift.end)} · ${hoursLabel(shiftLen(shift))}`}
-              </span>
-              <span style={css("font-family:'Heebo', sans-serif;font-size:16px;font-weight:500;line-height:1.25;")}>
-                {shift.person || 'ללא שם'}
-              </span>
-              {shift.note ? (
-                <span style={css('font-size:13.5px;color:#5f574c;line-height:1.4;')}>{shift.note}</span>
-              ) : null}
-              {shift.msg ? (
-                <span style={css(`font-size:13px;line-height:1.4;margin-top:2px;color:${tone.strong};border-right:2px solid ${tone.strong};padding-right:6px;`)}>
-                  {`מיפעת: ${shift.msg}`}
-                </span>
-              ) : null}
-              {!shift.confirmed ? (
-                <span style={css('font-size:12px;color:#8a8073;margin-top:2px;')}>ממתין לאישור</span>
-              ) : null}
-            </button>
+              <div style={css(`font-family:'Heebo', sans-serif;font-size:${compact ? '11px' : '15px'};font-weight:700;line-height:1.2;`)}>
+                {day.name}
+              </div>
+              <div style={css(`font-size:${compact ? '9.5px' : '12px'};color:#8a8073;margin-top:1px;font-variant-numeric:tabular-nums;line-height:1.2;`)}>
+                {day.date}
+              </div>
+              {/* Coverage for the day, so the week still reads at a glance. */}
+              <div style={css(`height:3px;margin-top:${compact ? '3px' : '5px'};background:#ded7cc;border-radius:999px;overflow:hidden;`)}>
+                <div
+                  style={css(
+                    `height:100%;width:${Math.round((day.covered / 1440) * 100)}%;border-radius:999px;` +
+                      `background:${day.covered >= 1440 ? 'oklch(0.6 0.09 150)' : ACCENT};`
+                  )}
+                />
+              </div>
+            </div>
           );
         })}
 
-        {day.gaps.map((gap) => (
+        <div style={css(`position:relative;height:${trackHeight}px;margin-top:6px;`)}>
+          {hourMarks.map((mark) => (
+            <div
+              key={mark.label}
+              style={css(
+                `position:absolute;top:${mark.top}px;left:0;right:0;text-align:left;` +
+                  `font-size:${compact ? '8.5px' : '11px'};color:#a1978a;font-variant-numeric:tabular-nums;line-height:1;`
+              )}
+            >
+              {mark.label}
+            </div>
+          ))}
+        </div>
+
+        {days.map((day) => (
           <div
-            key={`gap-${gap.from}`}
-            style={css('font-size:13px;color:#8a8073;background:#f7f3ed;border:1px dashed #ded7cc;border-radius:10px;padding:9px 12px;font-variant-numeric:tabular-nums;')}
+            key={`track-${day.dayIdx}`}
+            ref={day.dayIdx === 0 ? trackRef : null}
+            data-day-track={day.dayIdx}
+            onClick={(event) => {
+              if (!manager || event.target !== event.currentTarget) return;
+              const rect = event.currentTarget.getBoundingClientRect();
+              const hour = Math.max(
+                0,
+                Math.min(23, Math.floor((event.clientY - rect.top) / hourPx))
+              );
+              onAdd(day.dayIdx, hour);
+            }}
+            style={css(
+              `position:relative;height:${trackHeight}px;margin-top:6px;border-radius:${compact ? '7px' : '10px'};` +
+                `background:#fdfcfa;border:1px solid #e8e1d7;` +
+                `background-image:repeating-linear-gradient(to bottom, #eee8df 0 1px, transparent 1px ${hourPx}px);` +
+                `overflow:hidden;cursor:${manager ? 'copy' : 'default'};`
+            )}
           >
-            {`לא מאויש · ${hhmm(gap.from)}–${gap.to === 1440 ? '24:00' : hhmm(gap.to)}`}
+            {day.pieces.map((piece, index) => {
+              const shift = piece.shift;
+              const tone = shift.caregiverId ? toneFor(shift.caregiverId) : NEUTRAL_TONE;
+              const width = 100 / day.laneCount;
+              const height = Math.max(
+                compact ? 11 : 26,
+                ((piece.to - piece.from) / 60) * hourPx - (compact ? 1 : 3)
+              );
+              // A phone block is only a few pixels tall, so each line of text
+              // has to earn its place.
+              const showTime = !compact || height >= 30;
+              const showNote = shift.note && (!compact || height >= 48);
+              const showMsg = shift.msg && (!compact || height >= 62);
+              const msgText = shift.msg
+                ? height >= 64 && !compact
+                  ? `מיפעת: ${shift.msg}`
+                  : 'הודעה מיפעת'
+                : '';
+              return (
+                <button
+                  key={`${shift.id}-${index}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onOpen(shift);
+                  }}
+                  title={`${hhmm(shift.start)}–${hhmm(shift.end)} ${shift.person || ''}`}
+                  style={css(
+                    [
+                      'position:absolute',
+                      `top:${(piece.from / 60) * hourPx}px`,
+                      `height:${height}px`,
+                      `right:${piece.lane * width}%`,
+                      `width:calc(${width}% - ${compact ? 2 : 4}px)`,
+                      'text-align:right',
+                      `padding:${compact ? '1px 3px' : '4px 7px'}`,
+                      `border-radius:${compact ? '5px' : '8px'}`,
+                      'cursor:pointer',
+                      'overflow:hidden',
+                      'display:flex',
+                      'flex-direction:column',
+                      'gap:1px',
+                      `background:${shift.confirmed ? tone.bg : `repeating-linear-gradient(135deg,${tone.bg} 0 7px, #fdfcfa 7px 14px)`}`,
+                      `border:1px solid ${tone.border}`,
+                      'color:#26221e',
+                      'font-family:Assistant, sans-serif',
+                    ].join(';')
+                  )}
+                >
+                  {showTime ? (
+                    <span
+                      style={css(
+                        `font-size:${compact ? '9px' : '11px'};color:#6f6659;font-variant-numeric:tabular-nums;` +
+                          `display:block;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;`
+                      )}
+                    >
+                      {/* A phone column is ~45px wide: the full range wraps to
+                          two lines, and the block's height already shows where
+                          the shift ends. */}
+                      {compact
+                        ? (piece.cont ? '↑ ' : '') + hhmm(shift.start)
+                        : (piece.cont ? 'המשך · ' : '') + hhmm(shift.start) + '–' + hhmm(shift.end)}
+                    </span>
+                  ) : null}
+                  <span
+                    style={css(
+                      `font-family:'Heebo', sans-serif;font-size:${compact ? '9.5px' : '14px'};font-weight:500;display:block;` +
+                        `line-height:1.15;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;`
+                    )}
+                  >
+                    {shift.person || 'ללא שם'}
+                  </span>
+                  {showNote ? (
+                    <span
+                      style={css(
+                        `font-size:${compact ? '9px' : '11.5px'};color:#5f574c;display:block;line-height:1.2;overflow:hidden;` +
+                          (compact ? 'white-space:nowrap;text-overflow:ellipsis;' : '')
+                      )}
+                    >
+                      {shift.note}
+                    </span>
+                  ) : null}
+                  {showMsg ? (
+                    <span
+                      style={css(
+                        `display:block;margin-top:2px;font-size:${compact ? '9px' : '11.5px'};line-height:1.2;` +
+                          `color:${tone.strong};border-right:2px solid ${tone.strong};padding-right:5px;overflow:hidden;`
+                      )}
+                    >
+                      {compact ? 'הודעה' : msgText}
+                    </span>
+                  ) : null}
+                </button>
+              );
+            })}
           </div>
         ))}
       </div>
-
-      {manager ? (
-        <button
-          onClick={() => onAdd(day.dayIdx)}
-          style={css('border:none;background:#26221e;color:#f6f3ee;padding:12px 16px;border-radius:12px;font-size:15px;cursor:pointer;font-family:Heebo, sans-serif;')}
-        >
-          {`+ הוספת משמרת ליום ${day.name}`}
-        </button>
-      ) : null}
     </div>
   );
 }
+
 
 export default function App() {
   const [boot, setBoot] = useState({ status: 'loading', error: '' });
@@ -206,7 +286,6 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState('');
 
-  const [mobileDay, setMobileDay] = useState(0);
   const revisionRef = useRef(0);
   const weekRef = useRef(null);
   weekRef.current = week;
@@ -270,14 +349,6 @@ export default function App() {
     load(week).catch(reportError);
   }, [week, data, load, reportError]);
 
-  // On a phone only one day is on screen, so open on today whenever the week
-  // being viewed contains it. `today` comes from the server in APP_TIMEZONE.
-  useEffect(() => {
-    if (!data?.today || !data?.dates) return;
-    const index = data.dates.indexOf(data.today);
-    setMobileDay(index === -1 ? 0 : index);
-  }, [data?.today, data?.week]);
-
   const refresh = useCallback(() => {
     // Do not yank the schedule out from under an open editor; the refresh
     // happens when the editor closes instead.
@@ -291,8 +362,24 @@ export default function App() {
     onStale: refresh,
   });
 
-  const isNarrow = useIsNarrow();
+  const viewport = useViewport();
+  const isNarrow = viewport.isNarrow;
+  const trackRef = useRef(null);
+  const [trackTop, setTrackTop] = useState(null);
+  const hourPx = hourHeightFor(viewport, isNarrow ? trackTop : null);
   const manager = Boolean(data?.isManager) && !previewTeam;
+
+  // How much room the 24-hour track actually has is only knowable once the
+  // header above it has laid out, and that changes with the manager's extra
+  // button row. Measuring it keeps the whole board on one phone screen.
+  useLayoutEffect(() => {
+    if (!isNarrow || !trackRef.current) {
+      setTrackTop(null);
+      return;
+    }
+    const top = trackRef.current.getBoundingClientRect().top + window.scrollY;
+    setTrackTop((prev) => (prev !== null && Math.abs(prev - top) < 2 ? prev : top));
+  });
 
   const caregivers = data?.caregivers ?? [];
   const shifts = data?.shifts ?? [];
@@ -379,17 +466,6 @@ export default function App() {
 
     return { days: built, coveredMin: covered, gapText: gaps };
   }, [shifts, dates]);
-
-  const hourMarks = useMemo(() => {
-    const marks = [];
-    for (let h = 0; h <= 24; h += 2) {
-      marks.push({
-        label: h === 24 ? '24:00' : hhmm(h * 60),
-        style: `position:absolute;top:${h * HOUR_PX - 8}px;left:0;right:0;text-align:left;font-size:11px;color:#a1978a;font-variant-numeric:tabular-nums;`,
-      });
-    }
-    return marks;
-  }, []);
 
   const minutesFor = useCallback(
     (caregiverId) =>
@@ -681,15 +757,15 @@ export default function App() {
     caregivers.find((p) => p.id === draftView.caregiverId)?.name || '';
 
   return (
-    <div dir="rtl" style={css(`min-height:100vh;padding:${isNarrow ? '16px 14px 56px' : '26px 20px 70px'};color:#26221e;`)}>
+    <div dir="rtl" style={css(`min-height:100vh;padding:${isNarrow ? '12px 12px 48px' : '26px 20px 70px'};color:#26221e;`)}>
       {toast ? (
         <div style={css('position:fixed;top:14px;left:50%;transform:translateX(-50%);background:#26221e;color:#f6f3ee;padding:9px 18px;border-radius:999px;font-size:14px;z-index:60;box-shadow:0 10px 30px rgba(38,34,30,.25);')}>
           {toast}
         </div>
       ) : null}
 
-      <div style={css('max-width:1280px;margin:0 auto;display:flex;flex-direction:column;gap:18px;')}>
-        <header style={css(`display:flex;flex-wrap:wrap;gap:${isNarrow ? '12px' : '16px'};align-items:${isNarrow ? 'flex-start' : 'flex-end'};justify-content:space-between;border-bottom:1px solid #ded7cc;padding-bottom:${isNarrow ? '12px' : '16px'};`)}>
+      <div style={css(`max-width:1280px;margin:0 auto;display:flex;flex-direction:column;gap:${isNarrow ? '10px' : '18px'};`)}>
+        <header style={css(`display:flex;flex-wrap:wrap;gap:${isNarrow ? '12px' : '16px'};align-items:${isNarrow ? 'flex-start' : 'flex-end'};justify-content:space-between;border-bottom:1px solid #ded7cc;padding-bottom:${isNarrow ? '10px' : '16px'};`)}>
           <div style={css('display:flex;flex-direction:column;gap:5px;')}>
             <div style={css('display:flex;gap:9px;align-items:center;')}>
               <span style={css("font-family:'Heebo', sans-serif;font-size:12px;letter-spacing:0.14em;color:#8a8073;")}>
@@ -731,152 +807,54 @@ export default function App() {
           </div>
         </header>
 
-        <section style={css(`display:flex;flex-wrap:wrap;gap:${isNarrow ? '10px' : '16px'};align-items:center;background:#fdfcfa;border:1px solid #e4ddd3;border-radius:14px;padding:14px ${isNarrow ? '14px' : '18px'};`)}>
+        <section style={css(`display:flex;flex-wrap:wrap;gap:${isNarrow ? '10px' : '16px'};align-items:center;background:#fdfcfa;border:1px solid #e4ddd3;border-radius:14px;padding:${isNarrow ? '10px 12px' : '14px 18px'};`)}>
           <div style={css(`display:flex;flex-direction:column;gap:1px;min-width:${isNarrow ? '0' : '138px'};`)}>
-            <div style={css("font-family:'Heebo', sans-serif;font-size:21px;font-weight:700;")}>{missingH} שעות</div>
-            <div style={css('font-size:13px;color:#8a8073;')}>שעות עוד חסרות מתוך 168</div>
+            <div style={css(`font-family:'Heebo', sans-serif;font-size:${isNarrow ? '17px' : '21px'};font-weight:700;`)}>
+              {missingH} שעות
+            </div>
+            <div style={css(`font-size:${isNarrow ? '12px' : '13px'};color:#8a8073;`)}>שעות עוד חסרות מתוך 168</div>
           </div>
           <div style={css(`flex:1;min-width:${isNarrow ? '120px' : '170px'};height:10px;background:#eae4db;border-radius:999px;overflow:hidden;`)}>
             <div style={css(`height:100%;width:${pct}%;background:${ACCENT};border-radius:999px;transition:width .3s;`)} />
           </div>
-          <div style={css('font-size:14px;color:#6f6659;line-height:1.5;max-width:520px;')}>
+          <div style={css(`font-size:${isNarrow ? '12.5px' : '14px'};color:#6f6659;line-height:1.45;max-width:520px;`)}>
             {gapText.length === 0
               ? 'כל היממה מכוסה לאורך כל השבוע.'
-              : `החורים הקרובים: ${gapText.slice(0, 4).join(' · ')}${gapText.length > 4 ? ` ועוד ${gapText.length - 4}` : ''}`}
+              : `החורים הקרובים: ${gapText.slice(0, isNarrow ? 2 : 4).join(' · ')}${
+                  gapText.length > (isNarrow ? 2 : 4)
+                    ? ` ועוד ${gapText.length - (isNarrow ? 2 : 4)}`
+                    : ''
+                }`}
           </div>
         </section>
 
-        {isNarrow ? (
-          <MobileSchedule
-            days={days}
-            selected={mobileDay}
-            onSelect={setMobileDay}
-            manager={manager}
-            toneFor={toneFor}
-            onOpen={(shift) => {
-              setDraftError('');
-              setDraft({ ...shift, isNew: false });
-            }}
-            onAdd={(dayIdx) => {
-              setDraftError('');
-              setDraft({
-                isNew: true,
-                week,
-                day: dayIdx,
-                start: 480,
-                end: 720,
-                caregiverId: null,
-                note: '',
-                msg: '',
-                confirmed: false,
-              });
-            }}
-          />
-        ) : (
-        <div style={css('overflow-x:auto;padding-bottom:8px;')}>
-          <div style={css('min-width:980px;display:grid;grid-template-columns:62px repeat(7, minmax(0, 1fr));gap:6px;')}>
-            <div />
-            {days.map((day) => (
-              <div key={`head-${day.dayIdx}`} style={css('text-align:center;padding:7px 4px;border-radius:10px;background:#efeae2;')}>
-                <div style={css("font-family:'Heebo', sans-serif;font-size:15px;font-weight:700;")}>{day.name}</div>
-                <div style={css('font-size:12px;color:#8a8073;margin-top:1px;font-variant-numeric:tabular-nums;')}>{day.date}</div>
-              </div>
-            ))}
-
-            <div style={css('position:relative;height:816px;margin-top:6px;')}>
-              {hourMarks.map((mark) => (
-                <div key={mark.label} style={css(mark.style)}>{mark.label}</div>
-              ))}
-            </div>
-
-            {days.map((day) => (
-              <div
-                key={`track-${day.dayIdx}`}
-                data-day-track={day.dayIdx}
-                onClick={(event) => {
-                  if (!manager || event.target !== event.currentTarget) return;
-                  const rect = event.currentTarget.getBoundingClientRect();
-                  const hour = Math.max(
-                    0,
-                    Math.min(23, Math.floor((event.clientY - rect.top) / HOUR_PX))
-                  );
-                  setDraftError('');
-                  setDraft({
-                    isNew: true,
-                    week,
-                    day: day.dayIdx,
-                    start: hour * 60,
-                    end: ((hour + 4) % 24) * 60,
-                    caregiverId: null,
-                    note: '',
-                    msg: '',
-                    confirmed: false,
-                  });
-                }}
-                style={css(
-                  `position:relative;height:816px;margin-top:6px;border-radius:10px;background:#fdfcfa;border:1px solid #e8e1d7;background-image:repeating-linear-gradient(to bottom, #eee8df 0 1px, transparent 1px 34px);overflow:hidden;cursor:${manager ? 'copy' : 'default'};`
-                )}
-              >
-                {day.pieces.map((piece, index) => {
-                  const s = piece.shift;
-                  const t = s.caregiverId ? toneFor(s.caregiverId) : NEUTRAL_TONE;
-                  const w = 100 / day.laneCount;
-                  const h = Math.max(26, ((piece.to - piece.from) / 60) * HOUR_PX - 3);
-                  const msgText = s.msg ? (h >= 64 ? `מיפעת: ${s.msg}` : 'הודעה מיפעת') : '';
-                  return (
-                    <button
-                      key={`${s.id}-${index}`}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        setDraftError('');
-                        setDraft({ ...s, isNew: false });
-                      }}
-                      style={css(
-                        [
-                          'position:absolute',
-                          `top:${(piece.from / 60) * HOUR_PX}px`,
-                          `height:${h}px`,
-                          `right:${piece.lane * w}%`,
-                          `width:calc(${w}% - 4px)`,
-                          'text-align:right',
-                          'padding:4px 7px',
-                          'border-radius:8px',
-                          'cursor:pointer',
-                          'overflow:hidden',
-                          'display:flex',
-                          'flex-direction:column',
-                          'gap:1px',
-                          `background:${s.confirmed ? t.bg : `repeating-linear-gradient(135deg,${t.bg} 0 7px, #fdfcfa 7px 14px)`}`,
-                          `border:1px solid ${t.border}`,
-                          'color:#26221e',
-                          'font-family:Assistant, sans-serif',
-                        ].join(';')
-                      )}
-                    >
-                      <span style={css('font-size:11px;color:#6f6659;font-variant-numeric:tabular-nums;display:block;')}>
-                        {(piece.cont ? 'המשך · ' : '') + hhmm(s.start) + '–' + hhmm(s.end)}
-                      </span>
-                      <span style={css("font-family:'Heebo', sans-serif;font-size:14px;font-weight:500;display:block;line-height:1.25;")}>
-                        {s.person || 'ללא שם'}
-                      </span>
-                      <span style={css('font-size:11.5px;color:#5f574c;display:block;line-height:1.3;')}>{s.note || ''}</span>
-                      <span
-                        style={css(
-                          s.msg
-                            ? `display:block;margin-top:2px;font-size:11.5px;line-height:1.3;color:${t.strong};border-right:2px solid ${t.strong};padding-right:5px;`
-                            : 'display:none;'
-                        )}
-                      >
-                        {msgText}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            ))}
-          </div>
-        </div>
-        )}
+        <WeekGrid
+          days={days}
+          manager={manager}
+          toneFor={toneFor}
+          hourPx={hourPx}
+          compact={isNarrow}
+          today={data?.today}
+          trackRef={trackRef}
+          onOpen={(shift) => {
+            setDraftError('');
+            setDraft({ ...shift, isNew: false });
+          }}
+          onAdd={(dayIdx, hour) => {
+            setDraftError('');
+            setDraft({
+              isNew: true,
+              week,
+              day: dayIdx,
+              start: hour * 60,
+              end: ((hour + 4) % 24) * 60,
+              caregiverId: null,
+              note: '',
+              msg: '',
+              confirmed: false,
+            });
+          }}
+        />
 
         <section style={css('display:flex;flex-wrap:wrap;gap:18px;align-items:stretch;')}>
           {manager ? (

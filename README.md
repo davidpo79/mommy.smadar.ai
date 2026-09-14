@@ -66,23 +66,32 @@ could not drift.
 ### Two layouts
 
 Every style in this app is inline, so the breakpoint is a `matchMedia` check in
-JavaScript (`client/src/useViewport.js`) rather than a CSS media query. Below
-760px the page switches to a phone layout:
+JavaScript (`client/src/useViewport.js`) rather than a CSS media query. Both
+layouts render the same `WeekGrid`: seven day columns over a 24-hour track, all
+seven days and all 24 hours on screen at once. Below 760px it switches to a
+compact variant rather than a different structure.
 
-- The 7 x 24 wall grid becomes a scrollable day picker plus the selected day's
-  shifts as full-width cards. Each pill shows that day's covered hours (`4/24`,
-  or `מלא`), so gaps are still visible at a glance across the week.
-- Uncovered stretches are listed explicitly under the day's shifts, which is
-  the job the empty space in the grid was doing on a large screen.
-- The day picker opens on today whenever the week on screen contains it. The
-  date comes from the server in `APP_TIMEZONE`, not from the device clock.
-- Managers get a full-width "add a shift to this day" button in place of
-  clicking a position in a column.
+- **Hour height is measured, not guessed.** The desktop grid is the prototype's
+  fixed 34px per hour. On a phone the app measures where the track actually
+  starts — which moves when the manager's extra button row appears — and divides
+  the remaining viewport height across 24 hours, to one decimal place, clamped
+  to 14–26px. On the phones tested the whole board lands above the fold.
+- **Every dimension shrinks with it**: column gaps, the hour gutter, day
+  headers, block padding and radii.
+- **Text in a block earns its place.** A phone column is about 45px wide, so a
+  block shows the start time only (its height already shows where the shift
+  ends), and the caregiver name, notes and the message indicator appear only as
+  the block gets tall enough for them. Tapping a block opens the same editor as
+  on desktop, with the full text.
+- **Each day header carries a coverage bar**, so the week's gaps read at a
+  glance even when the blocks are too small to label, and today's column is
+  tinted. Today comes from the server in `APP_TIMEZONE`, not the device clock.
+- Header, coverage card, hours panel and both modals tighten their spacing and
+  drop their desktop min-widths at the same breakpoint. Form controls are
+  forced to 16px so iOS does not zoom the page when a field takes focus.
 
-Both layouts use the same data, the same components for the roster, hours
-tracking and editor, and the same colours and confirmation styling. Form
-controls are forced to 16px below the breakpoint so iOS does not zoom the page
-when a field takes focus.
+Managers create a shift the same way in both: tapping an empty position in a
+day column opens the editor at that hour.
 
 ## Data model
 
