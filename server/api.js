@@ -276,11 +276,26 @@ async function assertCaregiverExists(caregiverId) {
   if (!rows.length) throw new HttpError(404, 'caregiver_not_found');
 }
 
-api.post('/shifts', requireManager, async (req, res, next) => {
+/**
+ * Creating a shift is open to anyone who can read the board, so a caregiver can
+ * put herself down for a slot. What she creates is a *request*: the server
+ * forces it unconfirmed and strips the manager's message field, and only a
+ * manager can confirm it. The board already draws unconfirmed shifts striped,
+ * so a request reads as pending to everyone until it is approved.
+ */
+api.post('/shifts', requireRead, throttlePublicWrites, async (req, res, next) => {
   try {
     const input = readShiftBody(req.body);
     if (input.day === undefined) throw bad('invalid_day');
     if (input.start === undefined || input.end === undefined) throw bad('invalid_time');
+
+    if (!req.session.isManager) {
+      // A request has to say who it is for - an unassigned pending block would
+      // be nobody's to approve.
+      if (!input.caregiverId) throw bad('caregiver_required');
+      input.confirmed = false;
+      input.msg = '';
+    }
     await assertCaregiverExists(input.caregiverId);
 
     const { rows } = await query(
@@ -300,7 +315,9 @@ api.post('/shifts', requireManager, async (req, res, next) => {
       ]
     );
     const created = await query(`${SHIFT_SELECT} WHERE s.id = $1`, [rows[0].id]);
-    console.log(`[mutation] shift created id=${rows[0].id} week=${input.week}`);
+    console.log(
+      `[mutation] shift ${req.session.isManager ? 'created' : 'requested'} id=${rows[0].id} week=${input.week}`
+    );
     res.status(201).json(serializeShift(created.rows[0]));
   } catch (err) {
     next(err);
@@ -350,12 +367,32 @@ api.patch('/shifts/:id', requireManager, async (req, res, next) => {
   }
 });
 
-api.delete('/shifts/:id', requireManager, async (req, res, next) => {
+/**
+ * Managers delete anything. Anyone else may withdraw a request that has not been
+ * approved yet, and only their own: `as` names the caregiver withdrawing it, so
+ * a mistaken tap cannot cancel somebody else's pending slot. Once a shift is
+ * confirmed it is the manager's to remove.
+ */
+api.delete('/shifts/:id', requireRead, async (req, res, next) => {
   try {
     const id = asUuid(req.params.id);
+
+    if (!req.session.isManager) {
+      const existing = await query('SELECT * FROM shifts WHERE id = $1', [id]);
+      if (!existing.rows.length) throw new HttpError(404, 'shift_not_found');
+      const shift = existing.rows[0];
+      if (shift.confirmed) throw new HttpError(401, 'manager_required');
+      const claimed = asUuid(req.query.as, { nullable: true });
+      if (!claimed || claimed !== shift.caregiver_id) {
+        throw new HttpError(401, 'not_your_request');
+      }
+    }
+
     const { rowCount } = await query('DELETE FROM shifts WHERE id = $1', [id]);
     if (!rowCount) throw new HttpError(404, 'shift_not_found');
-    console.log(`[mutation] shift deleted id=${id}`);
+    console.log(
+      `[mutation] shift ${req.session.isManager ? 'deleted' : 'request withdrawn'} id=${id}`
+    );
     res.json({ deleted: id });
   } catch (err) {
     next(err);

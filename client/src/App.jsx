@@ -11,6 +11,16 @@ const WEEK_MINUTES = 7 * 24 * 60;
 // Which caregiver is using this device. A per-viewer convenience, never a
 // source of truth - the schedule and the checklist live in PostgreSQL.
 const ME_KEY = 'mommy:me';
+// One-tap shorthands for the things caregivers most often take on. They fill
+// the field rather than submitting, so anything can still be edited first.
+const CONTRIBUTIONS = [
+  'מביאה אוכל',
+  'אוספת תרופות',
+  'קניות',
+  'כביסה',
+  'הסעה לבדיקות',
+  'ליווי לרופא',
+];
 
 function hhmm(min) {
   const m = ((min % 1440) + 1440) % 1440;
@@ -98,7 +108,7 @@ const TIME_OPTIONS = Array.from({ length: 48 }, (_, i) => ({
  * `hourPx` is what actually scales it, and the caller derives it from the
  * viewport height.
  */
-function WeekGrid({ days, manager, toneFor, hourPx, compact, today, trackRef, onAdd, onOpen }) {
+function WeekGrid({ days, canAdd, toneFor, hourPx, compact, today, trackRef, onAdd, onOpen }) {
   const trackHeight = hourPx * 24;
 
   const hourMarks = [];
@@ -168,7 +178,7 @@ function WeekGrid({ days, manager, toneFor, hourPx, compact, today, trackRef, on
             ref={day.dayIdx === 0 ? trackRef : null}
             data-day-track={day.dayIdx}
             onClick={(event) => {
-              if (!manager || event.target !== event.currentTarget) return;
+              if (!canAdd || event.target !== event.currentTarget) return;
               const rect = event.currentTarget.getBoundingClientRect();
               const hour = Math.max(
                 0,
@@ -180,7 +190,7 @@ function WeekGrid({ days, manager, toneFor, hourPx, compact, today, trackRef, on
               `position:relative;height:${trackHeight}px;margin-top:6px;border-radius:${compact ? '7px' : '10px'};` +
                 `background:#fdfcfa;border:1px solid #e8e1d7;` +
                 `background-image:repeating-linear-gradient(to bottom, #eee8df 0 1px, transparent 1px ${hourPx}px);` +
-                `overflow:hidden;cursor:${manager ? 'copy' : 'default'};`
+                `overflow:hidden;cursor:${canAdd ? 'copy' : 'default'};`
             )}
           >
             {day.pieces.map((piece, index) => {
@@ -352,6 +362,19 @@ function ChecklistCard({
           </select>
         </label>
       ) : null}
+
+      <div style={css('display:flex;flex-wrap:wrap;gap:6px;')}>
+        {CONTRIBUTIONS.map((label) => (
+          <button
+            key={label}
+            type="button"
+            onClick={() => setText(label)}
+            style={css('border:1px solid #d4ccc0;background:#fdfcfa;color:#45403a;border-radius:999px;padding:6px 12px;font-size:13px;cursor:pointer;')}
+          >
+            {`+ ${label}`}
+          </button>
+        ))}
+      </div>
 
       <form onSubmit={submit} style={css('display:flex;gap:8px;align-items:center;')}>
         <input
@@ -571,6 +594,10 @@ export default function App() {
   const shifts = data?.shifts ?? [];
   // A remembered caregiver who has since left the roster is treated as unset.
   const effectiveMeId = caregivers.some((person) => person.id === meId) ? meId : '';
+  // Caregivers may put themselves down for a slot; the request needs somebody
+  // to attribute it to, so an empty roster leaves the board read-only.
+  const canAdd = manager || caregivers.length > 0;
+  const pendingCount = shifts.filter((shift) => !shift.confirmed).length;
   const dates = data?.dates ?? [];
 
   const toneById = useMemo(() => {
@@ -843,6 +870,16 @@ export default function App() {
       msg: draft.msg || '',
       confirmed: Boolean(draft.confirmed),
     };
+    if (!manager) {
+      // The server enforces this too; sending it honestly keeps the request
+      // payload matching what the caregiver was shown.
+      payload.confirmed = false;
+      payload.msg = '';
+      if (!payload.caregiverId) {
+        setDraftError('בחרי מי מהמלווים לוקחת את המשמרת.');
+        return;
+      }
+    }
     setBusy(true);
     try {
       if (draft.isNew) await api.createShift(payload);
@@ -873,7 +910,7 @@ export default function App() {
     }
     setBusy(true);
     try {
-      await api.deleteShift(draft.id);
+      await api.deleteShift(draft.id, manager ? undefined : effectiveMeId);
       setDraft(null);
       setDraftError('');
       await load(weekRef.current);
@@ -1072,6 +1109,11 @@ export default function App() {
           <div style={css(`flex:1;min-width:${isNarrow ? '120px' : '170px'};height:10px;background:#eae4db;border-radius:999px;overflow:hidden;`)}>
             <div style={css(`height:100%;width:${pct}%;background:${ACCENT};border-radius:999px;transition:width .3s;`)} />
           </div>
+          {manager && pendingCount > 0 ? (
+            <div style={css("flex:none;border-radius:999px;padding:5px 12px;font-size:13px;font-family:'Heebo', sans-serif;background:#f4ece4;border:1px solid #e0cdb8;color:#7a5a3a;")}>
+              {`${pendingCount} ממתינות לאישור`}
+            </div>
+          ) : null}
           <div style={css(`font-size:${isNarrow ? '12.5px' : '14px'};color:#6f6659;line-height:1.45;max-width:520px;`)}>
             {gapText.length === 0
               ? 'כל היממה מכוסה לאורך כל השבוע.'
@@ -1085,7 +1127,7 @@ export default function App() {
 
         <WeekGrid
           days={days}
-          manager={manager}
+          canAdd={canAdd}
           toneFor={toneFor}
           hourPx={hourPx}
           compact={isNarrow}
@@ -1103,7 +1145,7 @@ export default function App() {
               day: dayIdx,
               start: hour * 60,
               end: ((hour + 4) % 24) * 60,
-              caregiverId: null,
+              caregiverId: manager ? null : effectiveMeId || null,
               note: '',
               msg: '',
               confirmed: false,
@@ -1249,7 +1291,7 @@ export default function App() {
             <p style={css('margin:0;font-size:13px;color:#8a8073;line-height:1.6;')}>
               {manager
                 ? 'לחיצה על עמודת יום פותחת שיבוץ בשעה שנבחרה, וכל טווח שעות אפשרי. פסים אלכסוניים = ממתין לאישור. שעות של מלווה בתשלום נסכמות אוטומטית.'
-                : 'לוח לצפייה בלבד. לחיצה על משמרת מציגה את ההערות והמשימות ואת ההודעה מיפעת. פסים אלכסוניים = המשמרת עדיין לא אושרה.'}
+                : 'לחיצה על עמודת יום פותחת בקשת משמרת על שמך — הבקשה ממתינה לאישור של יפעת. לחיצה על משמרת מציגה את ההערות ואת ההודעה מיפעת. פסים אלכסוניים = עדיין לא אושרה.'}
             </p>
             <button
               onClick={toggleView}
@@ -1336,7 +1378,9 @@ export default function App() {
               <div style={css("font-family:'Heebo', sans-serif;font-size:20px;font-weight:700;")}>
                 {manager
                   ? `${draft.isNew ? 'שיבוץ חדש · יום ' : 'עריכת שיבוץ · יום '}${DAYS[draftView.day]}`
-                  : `יום ${DAYS[draftView.day]}`}
+                  : draft.isNew
+                    ? `בקשת משמרת · יום ${DAYS[draftView.day]}`
+                    : `יום ${DAYS[draftView.day]}`}
               </div>
               <button
                 onClick={closeEditor}
@@ -1490,6 +1534,107 @@ export default function App() {
                   </button>
                 </div>
               </div>
+            ) : draft.isNew ? (
+              /* A caregiver putting herself down for a slot. Everything here
+                 becomes a request: the server forces it unconfirmed, and it
+                 stays striped on the board until יפעת approves it. */
+              <div style={css('display:flex;flex-direction:column;gap:14px;')}>
+                <div style={css('display:flex;flex-direction:column;gap:7px;')}>
+                  <div style={css('font-size:13px;color:#8a8073;')}>מי לוקחת את המשמרת</div>
+                  <div style={css('display:flex;flex-wrap:wrap;gap:7px;')}>
+                    {caregivers.map((person) => {
+                      const picked = draftView.caregiverId === person.id;
+                      const t = toneFor(person.id);
+                      return (
+                        <button
+                          key={person.id}
+                          onClick={() => {
+                            patchDraft({ caregiverId: picked ? null : person.id });
+                            if (!picked) chooseMe(person.id);
+                          }}
+                          style={css(
+                            `${CHIP}background:${picked ? t.bg : '#fdfcfa'};border:1px solid ${picked ? t.border : '#d4ccc0'};color:#26221e;`
+                          )}
+                        >
+                          {person.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div style={css('display:flex;gap:10px;flex-wrap:wrap;')}>
+                  <label style={css('display:flex;flex-direction:column;gap:6px;flex:1;min-width:110px;')}>
+                    <span style={css('font-size:13px;color:#8a8073;')}>משעה</span>
+                    <select
+                      value={String(draftView.start)}
+                      onChange={(e) => patchDraft({ start: Number(e.target.value) })}
+                      style={css('width:100%;min-width:0;border:1px solid #d4ccc0;background:#fff;border-radius:10px;padding:9px 10px;font-size:15px;color:#26221e;font-variant-numeric:tabular-nums;')}
+                    >
+                      {TIME_OPTIONS.map((t) => (
+                        <option key={t.value} value={String(t.value)}>{t.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label style={css('display:flex;flex-direction:column;gap:6px;flex:1;min-width:110px;')}>
+                    <span style={css('font-size:13px;color:#8a8073;')}>עד שעה</span>
+                    <select
+                      value={String(draftView.end)}
+                      onChange={(e) => patchDraft({ end: Number(e.target.value) })}
+                      style={css('width:100%;min-width:0;border:1px solid #d4ccc0;background:#fff;border-radius:10px;padding:9px 10px;font-size:15px;color:#26221e;font-variant-numeric:tabular-nums;')}
+                    >
+                      {TIME_OPTIONS.map((t) => (
+                        <option key={t.value} value={String(t.value)}>{t.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <div style={css('font-size:13px;color:#6f6659;')}>
+                  {`משך: ${hoursLabel(dur)}${draftView.end <= draftView.start ? ` · חוצה חצות אל יום ${DAYS[(draftView.day + 1) % 7]}` : ''}`}
+                </div>
+
+                <div style={css('display:flex;flex-direction:column;gap:7px;')}>
+                  <span style={css('font-size:13px;color:#8a8073;')}>מה את מביאה או עושה במשמרת</span>
+                  <div style={css('display:flex;flex-wrap:wrap;gap:6px;')}>
+                    {CONTRIBUTIONS.map((label) => (
+                      <button
+                        key={label}
+                        type="button"
+                        onClick={() =>
+                          patchDraft({
+                            note: draftView.note
+                              ? `${draftView.note}, ${label}`
+                              : label,
+                          })
+                        }
+                        style={css('border:1px solid #d4ccc0;background:#fdfcfa;color:#45403a;border-radius:999px;padding:6px 12px;font-size:13px;cursor:pointer;')}
+                      >
+                        {`+ ${label}`}
+                      </button>
+                    ))}
+                  </div>
+                  <input
+                    value={draftView.note || ''}
+                    onChange={(e) => patchDraft({ note: e.target.value })}
+                    placeholder="אפשר גם לכתוב חופשי"
+                    style={css('width:100%;min-width:0;border:1px solid #d4ccc0;background:#fff;border-radius:10px;padding:9px 11px;font-size:15px;color:#26221e;')}
+                  />
+                </div>
+
+                <div style={css('font-size:13px;color:#6f6659;line-height:1.5;background:#f5f2ec;border:1px solid #e4ddd3;border-radius:12px;padding:11px 12px;')}>
+                  הבקשה תופיע בלוח בפסים אלכסוניים — ממתינה לאישור — עד שיפעת תאשר אותה.
+                </div>
+
+                <div style={css('display:flex;gap:8px;justify-content:flex-end;border-top:1px solid #eae4db;padding-top:14px;')}>
+                  <button
+                    onClick={saveShift}
+                    disabled={busy}
+                    style={css('border:none;background:#26221e;color:#f6f3ee;padding:9px 20px;border-radius:999px;font-size:14px;cursor:pointer;')}
+                  >
+                    שליחת בקשה
+                  </button>
+                </div>
+              </div>
             ) : (
               <div style={css('display:flex;flex-direction:column;gap:14px;')}>
                 <div style={css('display:flex;flex-direction:column;gap:3px;')}>
@@ -1515,12 +1660,25 @@ export default function App() {
                     {draftView.msg || 'אין הודעה חדשה.'}
                   </span>
                 </div>
-                <button
-                  onClick={closeEditor}
-                  style={css('align-self:flex-end;border:none;background:#26221e;color:#f6f3ee;padding:9px 20px;border-radius:999px;font-size:14px;cursor:pointer;')}
-                >
-                  סגירה
-                </button>
+                <div style={css('display:flex;gap:8px;justify-content:space-between;align-items:center;flex-wrap:wrap;')}>
+                  {!draftView.confirmed && draftView.caregiverId && draftView.caregiverId === effectiveMeId ? (
+                    <button
+                      onClick={deleteShift}
+                      disabled={busy}
+                      style={css('border:1px solid #e7d3cc;background:#fdf7f5;color:#8a4a37;padding:9px 14px;border-radius:999px;font-size:14px;cursor:pointer;')}
+                    >
+                      ביטול הבקשה
+                    </button>
+                  ) : (
+                    <span />
+                  )}
+                  <button
+                    onClick={closeEditor}
+                    style={css('border:none;background:#26221e;color:#f6f3ee;padding:9px 20px;border-radius:999px;font-size:14px;cursor:pointer;')}
+                  >
+                    סגירה
+                  </button>
+                </div>
               </div>
             )}
           </div>

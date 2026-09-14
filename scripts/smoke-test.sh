@@ -67,6 +67,30 @@ V=$(node -e "console.log(require('/tmp/pbody.json').version)")
 c=$(code -b $J -X PATCH -H 'Content-Type: application/json' -d "{\"note\":\"בדיקה מעודכנת\",\"version\":$V}" $B/api/mommy/shifts/$SH)
 chk "manager edits shift" "$(node -e "console.log(require('/tmp/pbody.json').note)")" "בדיקה מעודכנת"
 
+# a caregiver with no manager session may request a shift, but only as pending
+c=$(code -X POST -H 'Content-Type: application/json' -d "{\"week\":\"$WEEK\",\"day\":4,\"start\":600,\"end\":840,\"caregiverId\":\"$CG\",\"note\":\"בדיקת בקשה\",\"confirmed\":true,\"msg\":\"לא אמור להישמר\"}" $B/api/mommy/shifts)
+chk "caregiver can request a shift" "$c" "201"
+REQ=$(node -e "console.log(require('/tmp/pbody.json').id)")
+chk "request is forced pending" "$(node -e "console.log(require('/tmp/pbody.json').confirmed)")" "false"
+chk "manager message stripped from request" "$(node -e "console.log(require('/tmp/pbody.json').msg)")" ""
+c=$(code -X POST -H 'Content-Type: application/json' -d "{\"week\":\"$WEEK\",\"day\":4,\"start\":0,\"end\":120}" $B/api/mommy/shifts)
+chk "unassigned request rejected" "$c" "400"
+c=$(code -X PATCH -H 'Content-Type: application/json' -d '{"confirmed":true}' $B/api/mommy/shifts/$REQ)
+chk "caregiver cannot approve a shift" "$c" "401"
+c=$(code -X DELETE "$B/api/mommy/shifts/$REQ?as=$CG")
+chk "caregiver can withdraw her own request" "$c" "200"
+
+# a caregiver with no manager session may add a checklist task and tick it
+c=$(code -X POST -H 'Content-Type: application/json' -d '{"text":"בדיקת צ׳קליסט"}' $B/api/mommy/checklist)
+chk "caregiver can add a checklist task" "$c" "201"
+ITEM=$(node -e "console.log(require('/tmp/pbody.json').id)")
+c=$(code -X PATCH -H 'Content-Type: application/json' -d '{"done":true}' $B/api/mommy/checklist/$ITEM)
+chk "caregiver can tick a task" "$(node -e "console.log(require('/tmp/pbody.json').done)")" "true"
+c=$(code -X DELETE $B/api/mommy/checklist/$ITEM)
+chk "caregiver cannot delete a task" "$c" "401"
+c=$(code -b $J -X DELETE $B/api/mommy/checklist/$ITEM)
+chk "manager can delete a task" "$c" "200"
+
 # persistence across a brand-new client with no cookies at all
 c=$(code $B/api/mommy/state)
 chk "another device sees the shift" "$(node -e "console.log(require('/tmp/pbody.json').shifts.filter(s=>s.note==='בדיקה מעודכנת').length)")" "1"

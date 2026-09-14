@@ -47,7 +47,9 @@ export const api = {
 
   createShift: (payload) => request('POST', '/shifts', payload),
   updateShift: (id, payload) => request('PATCH', `/shifts/${id}`, payload),
-  deleteShift: (id) => request('DELETE', `/shifts/${id}`),
+  // `as` names the caregiver withdrawing a pending request; managers omit it.
+  deleteShift: (id, as) =>
+    request('DELETE', `/shifts/${id}${as ? `?as=${encodeURIComponent(as)}` : ''}`),
 
   createChecklistItem: (payload) => request('POST', '/checklist', payload),
   updateChecklistItem: (id, payload) => request('PATCH', `/checklist/${id}`, payload),

@@ -182,9 +182,9 @@ All routes are under `/api/mommy`. Mutations require a manager session.
 | `POST` | `/caregivers` | manager | create a caregiver |
 | `PATCH` | `/caregivers/:id` | manager | rename / change role / rate / active |
 | `DELETE` | `/caregivers/:id` | manager | deactivate or delete |
-| `POST` | `/shifts` | manager | create a shift |
+| `POST` | `/shifts` | **read** (forced pending) | create a shift, or request one |
 | `PATCH` | `/shifts/:id` | manager | edit a shift |
-| `DELETE` | `/shifts/:id` | manager | delete a shift |
+| `DELETE` | `/shifts/:id` | manager (own pending: read) | delete a shift, or withdraw a request |
 | `POST` | `/weeks/:week/copy-previous` | manager | replace a week with a copy of the one before |
 | `GET` | `/checklist` | read | the shared checklist |
 | `POST` | `/checklist` | **read** | add a task |
@@ -209,6 +209,42 @@ Error codes are stable strings: `invalid_code`, `manager_required`,
 `access_code_required`, `invalid_week`, `stale_version`, `duplicate`,
 `caregiver_not_found`, `shift_not_found`, `too_many_attempts`.
 
+## Shift requests
+
+A caregiver can put herself down for a slot without the manager code. Tapping an
+empty position in a day column opens a request rather than the manager's editor:
+she picks who it is for, the hours, and what she is bringing or doing. The board
+already draws unconfirmed shifts striped, so the request reads as pending to
+everyone until it is approved.
+
+The server does not trust the client for any of this. On a request from a
+session without the manager cookie it:
+
+- forces `confirmed` to false, so a request can never approve itself;
+- clears `message`, which is the manager's note *to* the caregiver;
+- requires a `caregiver_id` — an unassigned pending block would be nobody's to
+  approve;
+- and refuses `PATCH` outright, so hours, notes and approval on an existing
+  shift stay the manager's.
+
+Withdrawing works the same way: `DELETE /shifts/:id` accepts an `as` parameter
+naming the caregiver withdrawing, and a non-manager may only remove a shift that
+is still unconfirmed **and** attributed to that caregiver, so a mistaken tap
+cannot cancel somebody else's slot. Once a shift is approved it is the
+manager's to remove.
+
+Approving is the existing flow: the manager opens the shift and taps
+"ממתין לאישור — לחצו לאישור". So that requests do not sit unnoticed, the
+coverage card shows a count of pending shifts for the week whenever the manager
+is looking at it.
+
+**What this trust model is and is not.** Caregivers are not authenticated — the
+name on a request comes from the picker on that device, and anyone with the link
+could pick any name. That is the same footing as the rest of the team view, and
+it is why the public surface is limited to *proposing*: every public write
+produces something a manager has to approve, and nothing public can change or
+remove approved work.
+
 ## Shared checklist
 
 A running list of tasks for the care team — medication to buy, an appointment to
@@ -226,6 +262,12 @@ write surface, bounded on every side:
   300 items, and a task is capped at 300 characters.
 - Nothing else opened up: caregivers and shifts still reject every write without
   a manager session.
+
+A row of one-tap shorthands for the things caregivers most often take on —
+מביאה אוכל, אוספת תרופות, קניות, כביסה, הסעה לבדיקות, ליווי לרופא — sits above
+the field in both the checklist and the shift request form. They fill the field
+rather than submitting, so anything can still be edited first. The list is one
+array (`CONTRIBUTIONS` in `client/src/App.jsx`).
 
 Tasks are attributed when the writer has said who they are. The choice sits in
 a picker on the card and is remembered per device in `localStorage` — a viewer
