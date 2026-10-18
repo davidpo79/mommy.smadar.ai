@@ -62,6 +62,8 @@ export const api = {
   deleteChecklistItem: (id) => request('DELETE', `/checklist/${id}`),
   clearDoneChecklist: () => request('POST', '/checklist/clear-done'),
 
+  history: () => request('GET', '/history'),
+
   copyPreviousWeek: (week) =>
     request('POST', `/weeks/${encodeURIComponent(week)}/copy-previous`),
 };

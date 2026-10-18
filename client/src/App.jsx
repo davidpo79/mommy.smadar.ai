@@ -475,6 +475,216 @@ function ChecklistCard({
   );
 }
 
+const MONTHS = ['ינואר', 'פברואר', 'מרץ', 'אפריל', 'מאי', 'יוני', 'יולי', 'אוגוסט', 'ספטמבר', 'אוקטובר', 'נובמבר', 'דצמבר'];
+
+function monthLabel(key) {
+  const [y, m] = key.split('-').map(Number);
+  return `${MONTHS[m - 1]} ${y}`;
+}
+
+function monthRange(key) {
+  const [y, m] = key.split('-').map(Number);
+  const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  return { from: `${key}-01`, to: `${key}-${String(last).padStart(2, '0')}` };
+}
+
+function addDaysIso(iso, days) {
+  const [y, m, d] = iso.split('-').map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d + days, 12));
+  return date.toISOString().slice(0, 10);
+}
+
+/**
+ * Every shift ever scheduled, not just the week on the board: hours and cost
+ * per caregiver for a chosen period, then the weeks themselves, newest first.
+ * Manager-only - the server refuses it to anyone else because it carries pay.
+ * Cost uses each caregiver's current rate; past rates are not stored.
+ */
+function HistoryView({ isNarrow, toneFor, onOpenWeek, onClose }) {
+  const [history, setHistory] = useState(null);
+  const [error, setError] = useState('');
+  const [month, setMonth] = useState('all');
+  const [personId, setPersonId] = useState('all');
+
+  useEffect(() => {
+    api
+      .history()
+      .then(setHistory)
+      .catch(() => setError('טעינת ההיסטוריה נכשלה. נסו שוב.'));
+  }, []);
+
+  const shifts = history?.shifts ?? [];
+  const months = useMemo(
+    () => Array.from(new Set(shifts.map((s) => s.date.slice(0, 7)))).sort().reverse(),
+    [shifts]
+  );
+
+  const visible = useMemo(
+    () =>
+      shifts.filter(
+        (s) =>
+          (month === 'all' || s.date.startsWith(month)) &&
+          (personId === 'all' || (s.caregiverId || 'none') === personId)
+      ),
+    [shifts, month, personId]
+  );
+
+  const people = history?.caregivers ?? [];
+  const personById = useMemo(() => new Map(people.map((p) => [p.id, p])), [people]);
+
+  const totals = useMemo(() => {
+    const map = new Map();
+    visible.forEach((s) => {
+      const key = s.caregiverId || 'none';
+      const row = map.get(key) || { key, name: s.person || 'לא משובץ', minutes: 0, count: 0, pending: 0 };
+      row.minutes += shiftLen(s);
+      row.count += 1;
+      if (!s.confirmed) row.pending += 1;
+      map.set(key, row);
+    });
+    return Array.from(map.values())
+      .map((row) => {
+        const person = personById.get(row.key);
+        const rate = person?.paid ? Number(person.rate) || 0 : 0;
+        return { ...row, person, sum: Math.round((row.minutes / 60) * rate) };
+      })
+      .sort((a, b) => b.minutes - a.minutes);
+  }, [visible, personById]);
+
+  const weeks = useMemo(() => {
+    const map = new Map();
+    visible.forEach((s) => {
+      if (!map.has(s.week)) map.set(s.week, []);
+      map.get(s.week).push(s);
+    });
+    return Array.from(map.entries()).sort((a, b) => (a[0] < b[0] ? 1 : -1));
+  }, [visible]);
+
+  const totalMinutes = totals.reduce((sum, row) => sum + row.minutes, 0);
+  const totalCost = totals.reduce((sum, row) => sum + row.sum, 0);
+  const csvQuery = month === 'all' ? '' : `?from=${monthRange(month).from}&to=${monthRange(month).to}`;
+  const card = `background:#fdfcfa;border:1px solid #e4ddd3;border-radius:14px;padding:16px ${isNarrow ? '14px' : '18px'};display:flex;flex-direction:column;gap:10px;`;
+  const select = 'border:1px solid #d4ccc0;background:#fff;border-radius:999px;padding:8px 12px;font-size:14px;color:#26221e;font-family:Heebo, sans-serif;';
+
+  return (
+    <div style={css(`display:flex;flex-direction:column;gap:${isNarrow ? '12px' : '18px'};`)}>
+      <div style={css('display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;')}>
+        <div style={css("font-family:'Heebo', sans-serif;font-size:21px;font-weight:700;")}>היסטוריית שיבוצים</div>
+        <div style={css('display:flex;flex-wrap:wrap;gap:8px;align-items:center;')}>
+          <select value={month} onChange={(e) => setMonth(e.target.value)} style={css(select)}>
+            <option value="all">כל התקופה</option>
+            {months.map((key) => (
+              <option key={key} value={key}>{monthLabel(key)}</option>
+            ))}
+          </select>
+          <select value={personId} onChange={(e) => setPersonId(e.target.value)} style={css(select)}>
+            <option value="all">כל המלווים</option>
+            {people.map((p) => (
+              <option key={p.id} value={p.id}>{p.active ? p.name : `${p.name} (לא פעילה)`}</option>
+            ))}
+            <option value="none">לא משובץ</option>
+          </select>
+          <a
+            href={`/api/mommy/history.csv${csvQuery}`}
+            style={css('border:1px solid #d4ccc0;background:#fdfcfa;color:#45403a;padding:9px 14px;border-radius:999px;font-size:14px;text-decoration:none;')}
+          >
+            הורדה לאקסל
+          </a>
+          <button
+            onClick={onClose}
+            style={css('border:none;background:#26221e;color:#f6f3ee;padding:9px 15px;border-radius:999px;font-size:14px;cursor:pointer;')}
+          >
+            חזרה ללוח
+          </button>
+        </div>
+      </div>
+
+      {error ? <div style={css('font-size:14px;color:#9a4a3a;')}>{error}</div> : null}
+      {!history && !error ? <div style={css('font-size:14px;color:#8a8073;')}>טוען…</div> : null}
+
+      {history ? (
+        <>
+          <div style={css(card)}>
+            <div style={css('display:flex;justify-content:space-between;align-items:baseline;gap:10px;')}>
+              <div style={css("font-family:'Heebo', sans-serif;font-size:17px;font-weight:700;")}>
+                {`סיכום · ${month === 'all' ? 'כל התקופה' : monthLabel(month)}`}
+              </div>
+              <div style={css('font-size:12px;color:#8a8073;')}>עלות לפי התעריף הנוכחי</div>
+            </div>
+            {totals.length === 0 ? (
+              <div style={css('font-size:14px;color:#8a8073;')}>אין משמרות בתקופה הזו.</div>
+            ) : null}
+            {totals.map((row) => (
+              <div key={row.key} style={css('display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;padding:9px 12px;border-radius:10px;background:#f7f3ed;')}>
+                <span style={css(`width:10px;height:10px;border-radius:999px;background:${toneFor(row.key).border};display:inline-block;flex:none;`)} />
+                <span style={css('display:flex;flex-direction:column;gap:1px;flex:1;min-width:96px;')}>
+                  <span style={css("font-family:'Heebo', sans-serif;font-size:15px;font-weight:500;")}>
+                    {row.person && !row.person.active ? `${row.name} (לא פעילה)` : row.name}
+                  </span>
+                  <span style={css('font-size:12px;color:#8a8073;')}>
+                    {`${row.count} משמרות${row.pending ? ` · ${row.pending} לא אושרו` : ''}`}
+                  </span>
+                </span>
+                <span style={css('font-size:14px;color:#45403a;font-variant-numeric:tabular-nums;min-width:66px;')}>
+                  {hoursLabel(row.minutes)}
+                </span>
+                <span style={css("font-family:'Heebo', sans-serif;font-size:15px;font-weight:700;font-variant-numeric:tabular-nums;min-width:78px;text-align:left;")}>
+                  {row.person?.paid ? `₪${row.sum.toLocaleString('en-US')}` : '—'}
+                </span>
+              </div>
+            ))}
+            <div style={css('display:flex;justify-content:space-between;align-items:baseline;border-top:1px solid #eae4db;padding-top:11px;')}>
+              <span style={css('font-size:14px;color:#6f6659;')}>{`סך הכל · ${hoursLabel(totalMinutes)}`}</span>
+              <span style={css("font-family:'Heebo', sans-serif;font-size:20px;font-weight:700;font-variant-numeric:tabular-nums;")}>
+                {`₪${totalCost.toLocaleString('en-US')}`}
+              </span>
+            </div>
+          </div>
+
+          {weeks.map(([weekStart, list]) => {
+            const minutes = list.reduce((sum, s) => sum + shiftLen(s), 0);
+            return (
+              <div key={weekStart} style={css(card)}>
+                <div style={css('display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:10px;')}>
+                  <div style={css("font-family:'Heebo', sans-serif;font-size:16px;font-weight:700;")}>
+                    {`${weekStart === history.currentWeek ? 'השבוע הנוכחי' : 'שבוע'} · ראשון ${dayLabel(weekStart)} – שבת ${dayLabel(addDaysIso(weekStart, 6))}`}
+                  </div>
+                  <div style={css('display:flex;gap:10px;align-items:baseline;')}>
+                    <span style={css('font-size:13px;color:#6f6659;font-variant-numeric:tabular-nums;')}>
+                      {`${list.length} משמרות · ${hoursLabel(minutes)}`}
+                    </span>
+                    <button
+                      onClick={() => onOpenWeek(weekStart)}
+                      style={css('border:1px solid #d4ccc0;background:#fdfcfa;color:#45403a;padding:5px 11px;border-radius:999px;font-size:13px;cursor:pointer;')}
+                    >
+                      פתיחה בלוח
+                    </button>
+                  </div>
+                </div>
+                <div style={css('display:flex;flex-direction:column;gap:5px;')}>
+                  {list.map((s) => {
+                    const tone = toneFor(s.caregiverId);
+                    return (
+                      <div key={s.id} style={css(`display:flex;flex-wrap:wrap;gap:${isNarrow ? '6px' : '12px'};align-items:center;padding:7px 10px;border-radius:9px;background:${tone.bg};border:1px solid ${tone.border};font-size:14px;`)}>
+                        <span style={css('min-width:92px;color:#45403a;')}>{`${DAYS[s.day]} ${dayLabel(s.date)}`}</span>
+                        <span style={css("font-family:'Heebo', sans-serif;font-weight:500;flex:1;min-width:90px;")}>{s.person || 'לא משובץ'}</span>
+                        <span dir="ltr" style={css('font-variant-numeric:tabular-nums;color:#45403a;')}>{`${hhmm(s.start)}–${hhmm(s.end)}`}</span>
+                        <span style={css('font-variant-numeric:tabular-nums;color:#6f6659;min-width:48px;')}>{hoursLabel(shiftLen(s))}</span>
+                        {!s.confirmed ? <span style={css('font-size:12px;color:#7a5a3a;')}>לא אושרה</span> : null}
+                        {s.note ? <span style={css('flex-basis:100%;font-size:12.5px;color:#6f6659;')}>{s.note}</span> : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 export default function App() {
   const [boot, setBoot] = useState({ status: 'loading', error: '' });
   const [data, setData] = useState(null);
@@ -493,6 +703,7 @@ export default function App() {
   const [passError, setPassError] = useState('');
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState('');
+  const [showHistory, setShowHistory] = useState(false);
   const [meId, setMeId] = useState(() => {
     try {
       return localStorage.getItem(ME_KEY) || '';
@@ -717,6 +928,8 @@ export default function App() {
   const currentWeek = data?.weeks?.current;
   const nextWeek = data?.weeks?.next;
   const isCurrent = week === currentWeek;
+  // Week keys are ISO dates, so string order is date order.
+  const isPast = Boolean(week && currentWeek && week < currentWeek);
 
   // ---------------------------------------------------------------------
   // Mutations
@@ -1149,22 +1362,48 @@ export default function App() {
               רפואה שלמה במהרה לאמא
             </h1>
             <div style={css('font-size:15px;color:#6f6659;')}>
-              {`${isCurrent ? 'השבוע הנוכחי' : week === nextWeek ? 'השבוע הבא' : 'שבוע'} · ראשון ${dayLabel(dates[0])} – שבת ${dayLabel(dates[6])}`}
+              {`${isCurrent ? 'השבוע הנוכחי' : week === nextWeek ? 'השבוע הבא' : isPast ? 'שבוע שעבר' : 'שבוע'} · ראשון ${dayLabel(dates[0])} – שבת ${dayLabel(dates[6])}`}
             </div>
           </div>
           <div style={css('display:flex;flex-wrap:wrap;gap:8px;align-items:center;')}>
             <div style={css('display:flex;gap:4px;background:#ece7df;padding:4px;border-radius:999px;')}>
+              <button
+                onClick={() => setWeek(data.weeks.previous)}
+                aria-label="שבוע קודם"
+                title="שבוע קודם"
+                style={css(tabStyle(false))}
+              >
+                →
+              </button>
               <button onClick={() => setWeek(currentWeek)} style={css(tabStyle(isCurrent))}>השבוע</button>
               <button onClick={() => setWeek(nextWeek)} style={css(tabStyle(week === nextWeek))}>השבוע הבא</button>
+              <button
+                onClick={() => setWeek(data.weeks.requestedNext)}
+                aria-label="שבוע אחרי"
+                title="שבוע אחרי"
+                style={css(tabStyle(false))}
+              >
+                ←
+              </button>
             </div>
             {manager ? (
               <div style={css('display:flex;flex-wrap:wrap;gap:8px;')}>
+                {/* Copying replaces the whole week, which would erase a past
+                    week's record; the server refuses it as well. */}
+                {isPast ? null : (
+                  <button
+                    onClick={copyPrev}
+                    disabled={busy}
+                    style={css('border:1px solid #d4ccc0;background:#fdfcfa;color:#45403a;padding:9px 14px;border-radius:999px;font-size:14px;cursor:pointer;')}
+                  >
+                    שכפול מהשבוע הקודם
+                  </button>
+                )}
                 <button
-                  onClick={copyPrev}
-                  disabled={busy}
+                  onClick={() => setShowHistory(true)}
                   style={css('border:1px solid #d4ccc0;background:#fdfcfa;color:#45403a;padding:9px 14px;border-radius:999px;font-size:14px;cursor:pointer;')}
                 >
-                  שכפול מהשבוע הקודם
+                  היסטוריה
                 </button>
                 <button
                   onClick={shareTeam}
@@ -1177,6 +1416,18 @@ export default function App() {
           </div>
         </header>
 
+        {manager && showHistory ? (
+          <HistoryView
+            isNarrow={isNarrow}
+            toneFor={toneFor}
+            onClose={() => setShowHistory(false)}
+            onOpenWeek={(target) => {
+              setShowHistory(false);
+              setWeek(target);
+            }}
+          />
+        ) : (
+          <>
         <section style={css(`display:flex;flex-wrap:wrap;gap:${isNarrow ? '10px' : '16px'};align-items:center;background:#fdfcfa;border:1px solid #e4ddd3;border-radius:14px;padding:${isNarrow ? '10px 12px' : '14px 18px'};`)}>
           <div style={css(`display:flex;flex-direction:column;gap:1px;min-width:${isNarrow ? '0' : '138px'};`)}>
             <div style={css(`font-family:'Heebo', sans-serif;font-size:${isNarrow ? '17px' : '21px'};font-weight:700;`)}>
@@ -1389,6 +1640,8 @@ export default function App() {
             ) : null}
           </div>
         </section>
+          </>
+        )}
       </div>
 
       {askPass ? (

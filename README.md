@@ -194,7 +194,9 @@ All routes are under `/api/mommy`. Mutations require a manager session.
 | `DELETE` | `/shifts/:id/proposal` | manager rejects, owner withdraws | drop a proposal |
 | `POST` | `/shifts/:id/proposal/accept` | manager | apply the proposal |
 | `DELETE` | `/shifts/:id` | manager (own pending: read) | delete a shift, or withdraw a request |
-| `POST` | `/weeks/:week/copy-previous` | manager | replace a week with a copy of the one before |
+| `POST` | `/weeks/:week/copy-previous` | manager | replace a week with a copy of the one before (refused for past weeks: `409 past_week`) |
+| `GET` | `/history?from=YYYY-MM-DD&to=YYYY-MM-DD` | manager | every shift ever scheduled, with dates, plus all caregivers incl. inactive |
+| `GET` | `/history.csv?from=&to=` | manager | the same as a UTF-8 CSV for Excel |
 | `GET` | `/checklist` | read | the shared checklist |
 | `POST` | `/checklist` | **read** | add a task |
 | `PATCH` | `/checklist/:id` | **read** (text: manager) | tick, untick or reword |

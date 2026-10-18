@@ -14,7 +14,14 @@ import {
   throttleAuth,
 } from './auth.js';
 import { syncHub } from './sync.js';
-import { addWeeks, currentDate, currentWeekStart, normalizeWeek, weekDates } from './week.js';
+import {
+  addWeeks,
+  currentDate,
+  currentWeekStart,
+  normalizeWeek,
+  shiftDays,
+  weekDates,
+} from './week.js';
 import { serializeCaregiver, serializeChecklistItem, serializeShift } from './serialize.js';
 import {
   HttpError,
@@ -542,6 +549,11 @@ api.post('/shifts/:id/proposal/accept', requireManager, async (req, res, next) =
 api.post('/weeks/:week/copy-previous', requireManager, async (req, res, next) => {
   try {
     const week = resolveWeek(req.params.week);
+    // Copying replaces the target week wholesale, so a past week would lose
+    // the record of who actually covered it.
+    if (week < currentWeekStart()) {
+      throw new HttpError(409, 'past_week', 'A past week is history and cannot be overwritten.');
+    }
     const source = addWeeks(week, -1);
 
     const copied = await withTransaction(async (client) => {
@@ -566,6 +578,104 @@ api.post('/weeks/:week/copy-previous', requireManager, async (req, res, next) =>
     console.log(`[mutation] copied ${copied} shift(s) ${source} -> ${week}`);
     const state = await loadState(week, { isManager: true });
     res.json({ copied, source, ...state });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// History
+//
+// Every week ever scheduled, not just the one on the board. Manager-only,
+// because it carries pay rates. Caregivers who have since left the roster are
+// included: their past shifts still happened and still have to be paid.
+// ---------------------------------------------------------------------------
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function asOptionalDate(value, field) {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string' || !ISO_DATE_RE.test(value)) {
+    throw bad('invalid_date', `${field} must be a YYYY-MM-DD date.`);
+  }
+  return value;
+}
+
+async function loadHistory(req) {
+  const from = asOptionalDate(req.query.from, 'from');
+  const to = asOptionalDate(req.query.to, 'to');
+  const [caregivers, shifts] = await Promise.all([
+    query(`SELECT * FROM caregivers ORDER BY active DESC, sort_order, created_at, name`),
+    query(
+      `${SHIFT_SELECT}
+        WHERE ($1::date IS NULL OR s.week_start + s.day_of_week >= $1::date)
+          AND ($2::date IS NULL OR s.week_start + s.day_of_week <= $2::date)
+        ORDER BY s.week_start + s.day_of_week, s.start_minute, c.name`,
+      [from, to]
+    ),
+  ]);
+  return {
+    timezone: config.timezone,
+    today: currentDate(),
+    currentWeek: currentWeekStart(),
+    from,
+    to,
+    caregivers: caregivers.rows.map((row) => serializeCaregiver(row, { isManager: true })),
+    shifts: shifts.rows.map((row) => ({
+      ...serializeShift(row),
+      date: shiftDays(row.week_start, row.day_of_week),
+    })),
+  };
+}
+
+api.get('/history', requireManager, async (req, res, next) => {
+  try {
+    res.json(await loadHistory(req));
+  } catch (err) {
+    next(err);
+  }
+});
+
+const csvCell = (value) => {
+  const text = value === null || value === undefined ? '' : String(value);
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+};
+
+const minuteLabel = (min) =>
+  `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+
+const HISTORY_DAYS = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'];
+
+api.get('/history.csv', requireManager, async (req, res, next) => {
+  try {
+    const history = await loadHistory(req);
+    const byId = new Map(history.caregivers.map((c) => [c.id, c]));
+    const header = ['תאריך', 'יום', 'מלווה', 'התחלה', 'סיום', 'שעות', 'סטטוס', 'סוג', 'תעריף נוכחי', 'עלות משוערת', 'הערות'];
+    const lines = history.shifts.map((s) => {
+      const minutes = s.end > s.start ? s.end - s.start : s.end + 1440 - s.start;
+      const hours = Math.round((minutes / 60) * 100) / 100;
+      const person = byId.get(s.caregiverId);
+      const rate = person?.paid ? person.rate : 0;
+      return [
+        s.date,
+        HISTORY_DAYS[s.day],
+        s.person || 'לא משובץ',
+        minuteLabel(s.start),
+        minuteLabel(s.end),
+        hours,
+        s.confirmed ? 'מאושרת' : 'ממתינה',
+        person ? (person.paid ? 'בתשלום' : 'משפחה') : '',
+        rate || '',
+        rate ? Math.round(hours * rate) : '',
+        s.note,
+      ]
+        .map(csvCell)
+        .join(',');
+    });
+    const range = [history.from, history.to].filter(Boolean).join('_') || 'all';
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="mommy-history-${range}.csv"`);
+    // The BOM is what makes Excel read the Hebrew as UTF-8.
+    res.send(`﻿${[header.join(','), ...lines].join('\r\n')}\r\n`);
   } catch (err) {
     next(err);
   }
